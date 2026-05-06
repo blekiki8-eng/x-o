@@ -2,13 +2,12 @@ import os
 import uuid
 import logging
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Налаштування (Змінні в Railway)
 API_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 
@@ -16,11 +15,18 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# З'єднання з базою
 cluster = AsyncIOMotorClient(MONGO_URL)
 db = cluster["fishcash_game"]
 users_col = db["users"]
 games_col = db["games"]
+
+# --- Клавіатури ---
+
+def main_menu():
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(KeyboardButton("👤 Профіль"), KeyboardButton("🎮 Ігри"))
+    keyboard.add(KeyboardButton("💎 Баланс"))
+    return keyboard
 
 # --- Допоміжні функції ---
 
@@ -60,26 +66,37 @@ async def start(message: types.Message):
         game = await games_col.find_one({"game_id": game_id, "status": "waiting"})
         
         if not game:
-            return await message.answer("❌ Гра не знайдена або вже почалася.")
+            return await message.answer("❌ Гра не знайдена.")
         if game['creator_id'] == message.from_user.id:
-            return await message.answer("❌ Це ваше посилання. Перешліть його другу!")
+            return await message.answer("❌ Перешліть посилання другу!")
         if user['balance'] < game['bet']:
-            return await message.answer(f"❌ Недостатньо 💎. Треба {game['bet']}, а у вас {user['balance']}.")
+            return await message.answer(f"❌ Недостатньо 💎. Потрібно {game['bet']}.")
 
-        # Знімаємо ставку з другого гравця
         await users_col.update_one({"_id": message.from_user.id}, {"$inc": {"balance": -game['bet']}})
         await games_col.update_one({"game_id": game_id}, {
             "$set": {"opponent_id": message.from_user.id, "status": "playing", "turn": game['creator_id']}
         })
         
-        await message.answer(f"🎮 Гра почалася! Ставка: {game['bet']} 💎. Ви граєте за 'O'.")
+        await message.answer(f"🎮 Гра почалася! Ставка: {game['bet']} 💎", reply_markup=main_menu())
         await bot.send_message(game['creator_id'], "✅ Суперник приєднався! Ваш хід (X).", 
                                reply_markup=get_board_markup(game_id, game['board']))
         return
 
-    await message.answer(f"💎 Баланс: {user['balance']} 💎\n\n"
-                         "🕹 /tictactoe [ставка] — створити гру\n"
-                         "💰 Вивід від 200 💎")
+    await message.answer("Вітаємо у FishCash Game! 💎\nВикористовуйте меню нижче:", reply_markup=main_menu())
+
+@dp.message_handler(lambda message: message.text == "👤 Профіль")
+async def profile(message: types.Message):
+    user = await get_user(message.from_user.id, message.from_user.username)
+    await message.answer(f"👤 **Ваш профіль**\n\n🆔 ID: `{user['_id']}`\n💰 Баланс: {user['balance']} 💎", parse_mode="Markdown")
+
+@dp.message_handler(lambda message: message.text == "💎 Баланс")
+async def balance_info(message: types.Message):
+    user = await get_user(message.from_user.id, message.from_user.username)
+    await message.answer(f"💳 **Ваш баланс: {user['balance']} 💎**\n\n💵 Поповнення (від 50₴)\n📤 Вивід (від 200 💎)\n\nДля виводу зверніться до адміна.", parse_mode="Markdown")
+
+@dp.message_handler(lambda message: message.text == "🎮 Ігри")
+async def games_list(message: types.Message):
+    await message.answer("🕹 **Хрестики-нолики**\n\nЩоб створити гру, напишіть команду:\n`/tictactoe [ставка]`\n\nПриклад: `/tictactoe 10`", parse_mode="Markdown")
 
 @dp.message_handler(commands=['tictactoe'])
 async def create_game(message: types.Message):
@@ -87,7 +104,7 @@ async def create_game(message: types.Message):
     try:
         bet = int(message.get_args())
         if bet < 5: return await message.answer("❌ Мінімальна ставка 5 💎")
-        if user['balance'] < bet: return await message.answer("❌ Недостатньо 💎 на балансі")
+        if user['balance'] < bet: return await message.answer("❌ Недостатньо 💎")
         
         game_id = str(uuid.uuid4())[:8]
         new_game = {
@@ -100,9 +117,9 @@ async def create_game(message: types.Message):
         
         bot_info = await bot.get_me()
         link = f"https://t.me/{bot_info.username}?start=game_{game_id}"
-        await message.answer(f"🎲 Гра створена!\n💰 Ставка: {bet} 💎\n\nНадішли посилання другу:\n`{link}`", parse_mode="Markdown")
+        await message.answer(f"🎲 Гра на {bet} 💎 створена!\n\nНадішли посилання другу:\n`{link}`", parse_mode="Markdown")
     except:
-        await message.answer("Введіть ставку, наприклад: `/tictactoe 10`", parse_mode="Markdown")
+        await message.answer("Напишіть ставку числом. Приклад: `/tictactoe 5`")
 
 @dp.callback_query_handler(lambda c: c.data.startswith('cell_'))
 async def process_move(callback: types.CallbackQuery):
@@ -111,10 +128,10 @@ async def process_move(callback: types.CallbackQuery):
     game = await games_col.find_one({"game_id": game_id})
     
     if not game or game['status'] != "playing" or callback.from_user.id != game['turn']:
-        return await callback.answer("Зараз не твій хід або гра закінчена!")
+        return await callback.answer("Зараз не твій хід!")
     
     if game['board'][cell_idx] != " ":
-        return await callback.answer("Клітинка вже зайнята!")
+        return await callback.answer("Зайнято!")
 
     char = "X" if callback.from_user.id == game['creator_id'] else "O"
     new_board = list(game['board'])
