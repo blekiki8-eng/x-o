@@ -99,14 +99,20 @@ async def start_cmd(m: types.Message, state: FSMContext):
             if u['balance'] >= g['bet']:
                 await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -g['bet']}})
                 
-                # Повідомлення про початок гри
-                await m.answer("Суперник зайшов, Гра почалась ✅")
-                try: await bot.send_message(g['creator_id'], "Суперник зайшов, Гра почалась ✅")
+                # Текст старту гри
+                start_info = (
+                    f"🎮 **Гра: Хрестики-нолики**\n"
+                    f"💰 **Ставка: {g['bet']} 💎**\n"
+                    f"🏆 **Виграш: {round(g['bet']*2, 2)} 💎**\n\n"
+                    f"Гра почалася ✅"
+                )
+                
+                await m.answer(start_info, parse_mode="Markdown")
+                try: await bot.send_message(g['creator_id'], start_info, parse_mode="Markdown")
                 except: pass
                 
-                # НАДСИЛАЄМО НОВІ ПОВІДОМЛЕННЯ З ПОЛЕМ ДЛЯ ОБОХ (Гарантія появи)
-                msg_opp = await m.answer("🎮 Твій хід!", reply_markup=get_board_markup(gid, g['board']))
-                msg_cre = await bot.send_message(g['creator_id'], "🎮 Твій хід!", reply_markup=get_board_markup(gid, g['board']))
+                msg_opp = await m.answer("⏳ Завантаження поля...", reply_markup=get_board_markup(gid, g['board']))
+                msg_cre = await bot.send_message(g['creator_id'], "⏳ Завантаження поля...", reply_markup=get_board_markup(gid, g['board']))
                 
                 upd = {
                     "opponent_id": m.from_user.id, 
@@ -256,7 +262,10 @@ async def deposit_amount(m: types.Message, state: FSMContext):
 @dp.message_handler(state=DepositState.wait_receipt, content_types=['photo'])
 async def deposit_receipt(m: types.Message, state: FSMContext):
     data = await state.get_data()
-    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("✅", callback_data=f"ok_{m.from_user.id}_{data['deposit_amt']}"), InlineKeyboardButton("❌", callback_data=f"no_{m.from_user.id}"))
+    kb = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("✅ Підтвердити", callback_data=f"ok_{m.from_user.id}_{data['deposit_amt']}"),
+        InlineKeyboardButton("❌ Відхилити", callback_data=f"no_{m.from_user.id}")
+    )
     await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, caption=f"Чек від {m.from_user.id}\n💎: {data['deposit_amt']}", reply_markup=kb)
     await m.answer("✅ Чек надіслано!", reply_markup=main_menu())
     await state.finish()
@@ -265,11 +274,18 @@ async def deposit_receipt(m: types.Message, state: FSMContext):
 async def admin_verify(c: types.CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
     p = c.data.split("_")
+    
     if p[0] == "ok":
         await users_col.update_one({"_id": int(p[1])}, {"$inc": {"balance": float(p[2])}})
         try: await bot.send_message(int(p[1]), "✅ Баланс поповнено!")
         except: pass
-    await c.message.edit_caption("✅ Готово")
+        await c.message.edit_caption("✅ Поповнення підтверджено")
+    
+    elif p[0] == "no":
+        try: await bot.send_message(int(p[1]), "❌ Ваша заявка на поповнення відхилена адміном.")
+        except: pass
+        await c.message.edit_caption("❌ Поповнення відхилено")
+        
     await c.answer()
 
 async def check_timeouts():
