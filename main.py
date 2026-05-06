@@ -53,6 +53,11 @@ def main_menu():
     keyboard.add(KeyboardButton("💎 Баланс"))
     return keyboard
 
+def cancel_keyboard():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add(KeyboardButton("❌ Скасувати"))
+    return markup
+
 def get_board_markup(game_id, board):
     markup = InlineKeyboardMarkup(row_width=3)
     buttons = []
@@ -109,6 +114,12 @@ async def check_game_timeouts():
             logging.error(f"Timer error: {e}")
         await asyncio.sleep(5)
 
+# --- Обробник скасування ---
+@dp.message_handler(state="*", text="❌ Скасувати")
+async def cancel_handler(message: types.Message, state: FSMContext):
+    await state.finish()
+    await message.answer("Дію скасовано.", reply_markup=main_menu())
+
 # --- Обробники ---
 @dp.message_handler(commands=['start'])
 async def start_cmd(message: types.Message):
@@ -154,7 +165,7 @@ async def games_menu(message: types.Message):
     markup = InlineKeyboardMarkup().add(InlineKeyboardButton("❌ Хрестики-Нолики ⭕️", callback_data="tic_info"))
     await message.answer("Оберіть гру:", reply_markup=markup)
 
-# --- ВИПРАВЛЕНИЙ ОБРОБНИК СТАВКИ ---
+# --- ОБРОБНИК СТАВКИ ---
 @dp.message_handler(state=GameState.wait_bet)
 async def tic_final(message: types.Message, state: FSMContext):
     if message.text in ["👤 Профіль", "🎮 Ігри", "💎 Баланс"]:
@@ -170,11 +181,11 @@ async def tic_final(message: types.Message, state: FSMContext):
         if bet < 0.05: return await message.answer("❌ Мінімальна ставка 0.05 💎")
         if not user or user['balance'] < bet:
             await state.finish()
-            return await message.answer("❌ Мало коштів на балансі!")
+            return await message.answer("❌ Мало коштів на балансі!", reply_markup=main_menu())
         
         gid = str(uuid.uuid4())[:8]
         await users_col.update_one({"_id": message.from_user.id}, {"$inc": {"balance": -bet}})
-        msg = await message.answer("⏳ Створення гри...")
+        msg = await message.answer("⏳ Створення гри...", reply_markup=main_menu())
         await games_col.insert_one({
             "game_id": gid, "creator_id": message.from_user.id, "opponent_id": None, 
             "bet": bet, "board": [" "]*9, "status": "waiting", "turn": None, 
@@ -183,12 +194,12 @@ async def tic_final(message: types.Message, state: FSMContext):
         await message.answer(f"🔗 Посилання:\n`https://t.me/{(await bot.get_me()).username}?start=game_{gid}`", parse_mode="Markdown")
         await state.finish()
     except ValueError:
-        await message.answer("❌ Введіть число (суму ставки).")
+        await message.answer("❌ Введіть число (суму ставки) або натисніть кнопку скасування.", reply_markup=cancel_keyboard())
 
 # --- СИСТЕМА ВИВЕДЕННЯ ---
 @dp.callback_query_handler(lambda c: c.data == "withdraw_start")
 async def withdraw_init(callback: types.CallbackQuery):
-    await bot.send_message(callback.from_user.id, f"Виберіть сумму для виведення (мінімум {MIN_WITHDRAW}💎)")
+    await bot.send_message(callback.from_user.id, f"Виберіть сумму для виведення (мінімум {MIN_WITHDRAW}💎)", reply_markup=cancel_keyboard())
     await WithdrawState.wait_amount.set()
     await callback.answer()
 
@@ -200,7 +211,7 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
         if amt < MIN_WITHDRAW: return await message.answer(f"❌ Мінімум: {MIN_WITHDRAW} 💎")
         if user['balance'] < amt: return await message.answer("❌ Недостатньо коштів.")
         await state.update_data(withdraw_amt=amt)
-        await message.answer("Введіть ваш IBAN, ІПН та ПІБ")
+        await message.answer("Введіть ваш IBAN, ІПН та ПІБ", reply_markup=cancel_keyboard())
         await WithdrawState.wait_details.set()
     except: await message.answer("❌ Введіть число.")
 
@@ -211,13 +222,13 @@ async def withdraw_final(message: types.Message, state: FSMContext):
     await users_col.update_one({"_id": message.from_user.id}, {"$inc": {"balance": -amt}})
     admin_text = f"📤 **Заявка на вивід**\n\nДані: `{message.text}`\n💰 Сума: **{amt} 💎**\n👤 ID: `{message.from_user.id}`"
     await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown")
-    await message.answer("✅ Заявка прийнята! Виплата протягом 24 годин.")
+    await message.answer("✅ Заявка прийнята! Виплата протягом 24 годин.", reply_markup=main_menu())
     await state.finish()
 
 # --- ПОПОВНЕННЯ ТА АДМІН ---
 @dp.callback_query_handler(lambda c: c.data == "deposit")
 async def dep_start(callback: types.CallbackQuery):
-    await bot.send_message(callback.from_user.id, f"💰 Введіть суму в 💎 (мін. {MIN_DEPOSIT}):")
+    await bot.send_message(callback.from_user.id, f"💰 Введіть суму в 💎 (мін. {MIN_DEPOSIT}):", reply_markup=cancel_keyboard())
     await DepositState.wait_amount.set()
     await callback.answer()
 
@@ -229,7 +240,7 @@ async def dep_amt(message: types.Message, state: FSMContext):
         total_uah = (amt * EXCHANGE_RATE) * (1 + BONUS_PERCENT)
         await state.update_data(amount=amt)
         caption = f"📄 **Заявка на поповнення:**\n\nКурс: 1💎={EXCHANGE_RATE:.2f}₴\nДо сплати: {round(total_uah, 2)} ₴ (+5%)\n\n`5355 2800 2890 2177`\n\n(Обовʼязково сюди кидайте квитанцію)"
-        await message.answer(caption, parse_mode="Markdown")
+        await message.answer(caption, parse_mode="Markdown", reply_markup=cancel_keyboard())
         await DepositState.wait_receipt.set()
     except: await message.answer("❌ Введіть число.")
 
@@ -238,7 +249,7 @@ async def dep_rec(message: types.Message, state: FSMContext):
     data = await state.get_data()
     kb = InlineKeyboardMarkup().add(InlineKeyboardButton("✅ ТАК", callback_data=f"ok_{message.from_user.id}_{data['amount']}"), InlineKeyboardButton("❌ НІ", callback_data=f"no_{message.from_user.id}"))
     await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=f"Чек від `{message.from_user.id}`\nСума: {data['amount']} 💎", reply_markup=kb, parse_mode="Markdown")
-    await message.answer("✅ Чек надіслано!")
+    await message.answer("✅ Чек надіслано!", reply_markup=main_menu())
     await state.finish()
 
 @dp.callback_query_handler(lambda c: c.data.startswith(('ok_', 'no_')))
@@ -251,7 +262,7 @@ async def adm_action(callback: types.CallbackQuery):
         await users_col.update_one({"_id": target_uid}, {"$inc": {"balance": amount}})
         try: await bot.send_message(target_uid, f"✅ Баланс поповнено на {amount} 💎!")
         except: pass
-        await callback.message.edit_caption(f"✅ Нараховано {amount} 💎")
+        await callback.message.edit_caption(f"✅ Нараховано {amount} 💎 для {target_uid}")
     else:
         try: await bot.send_message(target_uid, "❌ Чек відхилено.")
         except: pass
@@ -267,7 +278,7 @@ async def tic_info(callback: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == "tic_create")
 async def tic_bet_req(callback: types.CallbackQuery):
-    await callback.message.answer("💰 Введіть ставку (мін. 0.05 💎):")
+    await callback.message.answer("💰 Введіть ставку (мін. 0.05 💎):", reply_markup=cancel_keyboard())
     await GameState.wait_bet.set()
     await callback.answer()
 
