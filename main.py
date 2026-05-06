@@ -1,6 +1,6 @@
 import os, uuid, logging, asyncio, time
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
@@ -13,7 +13,8 @@ API_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else 0
 
-MOVE_TIMEOUT, EXCHANGE_RATE, BONUS_PERCENT = 40, 44.50, 0.05
+MOVE_TIMEOUT = 30  # Таймер 30 секунд на хід
+EXCHANGE_RATE, BONUS_PERCENT = 44.50, 0.05
 MIN_DEPOSIT, MIN_WITHDRAW, MIN_BET = 0.50, 4.0, 0.05
 
 logging.basicConfig(level=logging.INFO)
@@ -64,16 +65,22 @@ async def update_game_messages(game, board, winner=None):
         if not uid or not mid: continue
         
         if winner:
-            if winner == "draw": text = "🤝 **Нічия!** Кошти повернуто."
+            # Якщо гра закінчена, видаляємо кнопки і пишемо статус
+            try: await bot.edit_message_reply_markup(uid, mid, reply_markup=None)
+            except: pass
+            
+            if winner == "draw": res_text = "🤝 **Нічия!** Кошти повернуто на баланс."
             else:
                 is_win = (winner == "X" and role == 'creator') or (winner == "O" and role == 'opponent')
-                text = "🏁 **Ви виграли!**" if is_win else "❌ **Ви програли.**"
+                res_text = "🏁 **Ви виграли!** 🏆" if is_win else "❌ **Ви програли.**"
+            
+            # Надсилаємо результат ОКРЕМИМ повідомленням нижче
+            await bot.send_message(uid, res_text, parse_mode="Markdown", reply_markup=main_menu())
         else:
-            text = "🎮 **Твій хід!**" if uid == game['turn'] else "⏳ **Хід суперника...**"
-
-        try:
-            await bot.edit_message_text(text, uid, mid, reply_markup=markup, parse_mode="Markdown")
-        except: pass
+            text = "🎮 **Твій хід! (30 сек)**" if uid == game['turn'] else "⏳ **Хід суперника...**"
+            try:
+                await bot.edit_message_text(text, uid, mid, reply_markup=markup, parse_mode="Markdown")
+            except: pass
 
 @dp.message_handler(state="*", text="❌ Скасувати")
 async def cancel_action(m: types.Message, state: FSMContext):
@@ -99,16 +106,17 @@ async def start_cmd(m: types.Message, state: FSMContext):
             if u['balance'] >= g['bet']:
                 await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -g['bet']}})
                 
-                # Текст старту гри
-                start_info = (
-                    f"🎮 **Гра: Хрестики-нолики**\n"
-                    f"💰 **Ставка: {g['bet']} 💎**\n"
-                    f"🏆 **Виграш: {round(g['bet']*2, 2)} 💎**\n\n"
-                    f"Гра почалася ✅"
-                )
+                # Повідомлення про деталі гри
+                info = (f"🎮 **Гра: Хрестики-нолики**\n💰 **Ставка: {g['bet']} 💎**\n"
+                        f"🏆 **Виграш: {round(g['bet']*2, 2)} 💎**\n\nГра почалася ✅")
                 
-                await m.answer(start_info, parse_mode="Markdown")
-                try: await bot.send_message(g['creator_id'], start_info, parse_mode="Markdown")
+                await m.answer(info, parse_mode="Markdown")
+                try: await bot.send_message(g['creator_id'], info, parse_mode="Markdown")
+                except: pass
+
+                # ПОВІДОМЛЕННЯ ПРО РОЛІ (ХТО ЧИМ ГРАЄ)
+                await m.answer("⭕️ Ви граєте за **Нолики (O)**", parse_mode="Markdown")
+                try: await bot.send_message(g['creator_id'], "❌ Ви граєте за **Хрестики (X)**", parse_mode="Markdown")
                 except: pass
                 
                 msg_opp = await m.answer("⏳ Завантаження поля...", reply_markup=get_board_markup(gid, g['board']))
@@ -128,6 +136,61 @@ async def start_cmd(m: types.Message, state: FSMContext):
                 return
             else: return await m.answer("❌ Недостатньо балансу.")
     await m.answer("Головне меню", reply_markup=main_menu())
+
+@dp.message_handler(state=GameState.wait_bet)
+async def tic_set_bet(m: types.Message, state: FSMContext):
+    try:
+        bet = float(m.text.replace(',', '.'))
+        u = await users_col.find_one({"_id": m.from_user.id})
+        if bet < MIN_BET: return await m.answer(f"❌ Мінімум {MIN_BET}")
+        if u['balance'] < bet: return await m.answer("❌ Недостатньо коштів!")
+        
+        gid = str(uuid.uuid4())[:8]
+        await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -bet}})
+        await state.finish()
+
+        link_text = (
+            f"🎮 **Гра: Хрестики-нолики**\n💰 **Ставка: {bet} 💎**\n\n"
+            f"Приєднуйся за посиланням:\nhttps://t.me/{(await bot.get_me()).username}?start=game_{gid}"
+        )
+        # ПРИБРАНО КНОПКУ СКАСУВАТИ (використовуємо ReplyKeyboardRemove)
+        await m.answer(link_text, disable_web_page_preview=True, reply_markup=ReplyKeyboardRemove())
+        await m.answer("Посиланння вище. Чекаємо суперника...", reply_markup=main_menu())
+        
+        await games_col.insert_one({
+            "game_id": gid, "creator_id": m.from_user.id, "opponent_id": None, 
+            "bet": bet, "board": [" "]*9, "status": "waiting", "turn": None, 
+            "creator_msg_id": None, "last_move_time": time.time()
+        })
+    except: await m.answer("❌ Введіть число.")
+
+@dp.callback_query_handler(lambda c: c.data.startswith('ticstep_'), state="*")
+async def tic_step(c: types.CallbackQuery):
+    _, gid, idx = c.data.split("_")
+    g = await games_col.find_one({"game_id": gid})
+    if not g or g['status'] != "playing" or c.from_user.id != g['turn'] or g['board'][int(idx)] != " ":
+        return await c.answer("Не твій хід або клітинка зайнята!")
+    
+    nb = list(g['board'])
+    nb[int(idx)] = "X" if c.from_user.id == g['creator_id'] else "O"
+    win = check_winner(nb)
+    nxt = g['opponent_id'] if c.from_user.id == g['creator_id'] else g['creator_id']
+    
+    await games_col.update_one({"game_id": gid}, {"$set": {"board": nb, "turn": nxt, "last_move_time": time.time()}})
+    
+    if win:
+        await games_col.update_one({"game_id": gid}, {"$set": {"status": "finished"}})
+        if win != "draw":
+            wid = g['creator_id'] if win == "X" else g['opponent_id']
+            await users_col.update_one({"_id": wid}, {"$inc": {"balance": g['bet']*2}})
+        else:
+            await users_col.update_many({"_id": {"$in": [g['creator_id'], g['opponent_id']]}}, {"$inc": {"balance": g['bet']}})
+    
+    g['board'], g['turn'] = nb, nxt
+    await update_game_messages(g, nb, win)
+    await c.answer()
+
+# --- ТУТ ІНШІ ОБРОБНИКИ (ПРОФІЛЬ, БАЛАНС, ВИВІД) ЗАЛИШАЮТЬСЯ БЕЗ ЗМІН ---
 
 @dp.message_handler(lambda m: m.text == "👤 Профіль", state="*")
 async def profile_view(m: types.Message):
@@ -186,59 +249,6 @@ async def tic_create_req(c: types.CallbackQuery):
     await GameState.wait_bet.set()
     await c.answer()
 
-@dp.message_handler(state=GameState.wait_bet)
-async def tic_set_bet(m: types.Message, state: FSMContext):
-    try:
-        bet = float(m.text.replace(',', '.'))
-        u = await users_col.find_one({"_id": m.from_user.id})
-        if bet < MIN_BET: return await m.answer(f"❌ Мінімум {MIN_BET}")
-        if u['balance'] < bet: return await m.answer("❌ Недостатньо коштів!")
-        
-        gid = str(uuid.uuid4())[:8]
-        await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -bet}})
-        await state.finish()
-
-        link_text = (
-            f"🎮 **Гра: Хрестики-нолики**\n"
-            f"💰 **Ставка: {bet} 💎**\n\n"
-            f"Приєднуйся за посиланням:\n"
-            f"https://t.me/{(await bot.get_me()).username}?start=game_{gid}"
-        )
-        await m.answer(link_text, disable_web_page_preview=True)
-        
-        await games_col.insert_one({
-            "game_id": gid, "creator_id": m.from_user.id, "opponent_id": None, 
-            "bet": bet, "board": [" "]*9, "status": "waiting", "turn": None, 
-            "creator_msg_id": None, "last_move_time": time.time()
-        })
-    except: await m.answer("❌ Введіть число.")
-
-@dp.callback_query_handler(lambda c: c.data.startswith('ticstep_'), state="*")
-async def tic_step(c: types.CallbackQuery):
-    _, gid, idx = c.data.split("_")
-    g = await games_col.find_one({"game_id": gid})
-    if not g or g['status'] != "playing" or c.from_user.id != g['turn'] or g['board'][int(idx)] != " ":
-        return await c.answer("Не ваш хід!")
-    
-    nb = list(g['board'])
-    nb[int(idx)] = "X" if c.from_user.id == g['creator_id'] else "O"
-    win = check_winner(nb)
-    nxt = g['opponent_id'] if c.from_user.id == g['creator_id'] else g['creator_id']
-    
-    await games_col.update_one({"game_id": gid}, {"$set": {"board": nb, "turn": nxt, "last_move_time": time.time()}})
-    
-    if win:
-        await games_col.update_one({"game_id": gid}, {"$set": {"status": "finished"}})
-        if win != "draw":
-            wid = g['creator_id'] if win == "X" else g['opponent_id']
-            await users_col.update_one({"_id": wid}, {"$inc": {"balance": g['bet']*2}})
-        else:
-            await users_col.update_many({"_id": {"$in": [g['creator_id'], g['opponent_id']]}}, {"$inc": {"balance": g['bet']}})
-    
-    g['board'], g['turn'] = nb, nxt
-    await update_game_messages(g, nb, win)
-    await c.answer()
-
 @dp.callback_query_handler(lambda c: c.data == "deposit", state="*")
 async def deposit_start(c: types.CallbackQuery, state: FSMContext):
     await state.finish()
@@ -274,31 +284,35 @@ async def deposit_receipt(m: types.Message, state: FSMContext):
 async def admin_verify(c: types.CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
     p = c.data.split("_")
-    
     if p[0] == "ok":
         await users_col.update_one({"_id": int(p[1])}, {"$inc": {"balance": float(p[2])}})
         try: await bot.send_message(int(p[1]), "✅ Баланс поповнено!")
         except: pass
-        await c.message.edit_caption("✅ Поповнення підтверджено")
-    
+        await c.message.edit_caption("✅ Підтверджено")
     elif p[0] == "no":
-        try: await bot.send_message(int(p[1]), "❌ Ваша заявка на поповнення відхилена адміном.")
+        try: await bot.send_message(int(p[1]), "❌ Ваша заявка на поповнення відхилена.")
         except: pass
-        await c.message.edit_caption("❌ Поповнення відхилено")
-        
+        await c.message.edit_caption("❌ Відхилено")
     await c.answer()
 
 async def check_timeouts():
     while True:
         try:
+            # Перевіряємо ігри, де вийшов час на хід (30 сек)
             async for game in games_col.find({"status": "playing"}):
                 if time.time() - game.get('last_move_time', 0) > MOVE_TIMEOUT:
-                    win_id = game['opponent_id'] if game['turn'] == game['creator_id'] else game['creator_id']
+                    # Той, чий зараз хід — програв
+                    loser_id = game['turn']
+                    winner_id = game['opponent_id'] if loser_id == game['creator_id'] else game['creator_id']
+                    
                     await games_col.update_one({"game_id": game['game_id']}, {"$set": {"status": "finished"}})
-                    await users_col.update_one({"_id": win_id}, {"$inc": {"balance": game['bet'] * 2}})
-                    await update_game_messages(game, game['board'], winner="X" if win_id == game['creator_id'] else "O")
+                    await users_col.update_one({"_id": winner_id}, {"$inc": {"balance": game['bet'] * 2}})
+                    
+                    # Визначаємо символ переможця для update_game_messages
+                    win_symbol = "X" if winner_id == game['creator_id'] else "O"
+                    await update_game_messages(game, game['board'], winner=win_symbol)
         except: pass
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
