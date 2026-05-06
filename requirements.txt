@@ -1,4 +1,1 @@
-aiogram==2.25.1
-pymongo
-dnspython
-python-dotenv
+aiohttp>=3.9.0
