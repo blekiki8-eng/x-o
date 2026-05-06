@@ -159,4 +159,29 @@ async def dep_3(message: types.Message, state: FSMContext):
 
 # --- Логіка Адмінки ---
 @dp.callback_query_handler(lambda c: c.data.startswith('adm_'))
-async def admin_decision
+# --- Логіка Адмінки ---
+@dp.callback_query_handler(lambda c: c.data.startswith('adm_'))
+async def admin_decision(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: 
+        return await callback.answer("Ви не адмін!")
+        
+    p = callback.data.split("_")
+    action = p[1]
+    uid = int(p[2])
+    amt = float(p[3]) if action == "confirm" else 0
+    
+    if action == "confirm":
+        await users_col.update_one({"_id": uid}, {"$inc": {"balance": amt}})
+        try:
+            await bot.send_message(uid, f"✅ Ваш баланс поповнено на {amt} 💎! Приємної гри.")
+        except:
+            pass
+        await callback.message.edit_caption(callback.message.caption + "\n\n✅ **ПРИЙНЯТО**", parse_mode="Markdown")
+    else:
+        try:
+            await bot.send_message(uid, "❌ Вашу заявку на поповнення відхилено.")
+        except:
+            pass
+        await callback.message.edit_caption(callback.message.caption + "\n\n❌ **ВІДХИЛЕНО**", parse_mode="Markdown")
+    
+    await callback.answer()
