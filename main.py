@@ -19,7 +19,7 @@ EXCHANGE_RATE = 44.50
 BONUS_PERCENT = 0.05
 MIN_DEPOSIT = 0.50
 MIN_WITHDRAW = 4.0
-MIN_BET = 0.05
+MIN_BET = 0.05  # Мінімальна ставка
 
 logging.basicConfig(level=logging.INFO)
 storage = MemoryStorage()
@@ -54,6 +54,7 @@ def get_board_markup(game_id, board):
     btns = [InlineKeyboardButton(board[i] if board[i] != " " else "⬜️", callback_data=f"ticstep_{game_id}_{i}") for i in range(9)]
     return markup.add(*btns)
 
+# --- ЛОГІКА ГРИ ---
 def check_winner(b):
     win_coords = [(0,1,2), (3,4,5), (6,7,8), (0,3,6), (1,4,7), (2,5,8), (0,4,8), (2,4,6)]
     for r in win_coords:
@@ -96,15 +97,21 @@ async def start_cmd(m: types.Message):
             u = await users_col.find_one({"_id": m.from_user.id})
             if u['balance'] >= g['bet']:
                 await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -g['bet']}})
-                mo = await m.answer("🎮 Гра починається!", reply_markup=main_menu())
+                
+                # Поле для суперника
+                mo = await m.answer("🎮 Гра починається!", reply_markup=get_board_markup(gid, g['board']))
+                
                 upd = {"opponent_id": m.from_user.id, "opponent_msg_id": mo.message_id, "status": "playing", "turn": g['creator_id'], "last_move_time": time.time()}
                 await games_col.update_one({"game_id": gid}, {"$set": upd})
                 g.update(upd)
-                try: await bot.send_message(g['creator_id'], "✅ Суперник знайдений! Твій хід.")
+                
+                try: 
+                    # Поле для творця
+                    await bot.edit_message_text("✅ Суперник знайдений! Твій хід.", g['creator_id'], g['creator_msg_id'], reply_markup=get_board_markup(gid, g['board']))
                 except: pass
-                await update_game_messages(g, g['board'])
                 return
-    await m.answer("Вітаю! Натискайте на кнопки", reply_markup=main_menu())
+            else: return await m.answer("❌ Недостатньо балансу.")
+    await m.answer("Вітаю! Оберіть дію:", reply_markup=main_menu())
 
 @dp.message_handler(lambda m: m.text == "💎 Баланс")
 async def balance_view(m: types.Message):
@@ -147,9 +154,9 @@ async def tic_set_bet(m: types.Message, state: FSMContext):
         await games_col.insert_one({"game_id": gid, "creator_id": m.from_user.id, "opponent_id": None, "bet": bet, "board": [" "]*9, "status": "waiting", "turn": None, "creator_msg_id": msg.message_id, "last_move_time": time.time()})
         await m.answer(f"🔗 Посилання для гри:\n`https://t.me/{(await bot.get_me()).username}?start=game_{gid}`", parse_mode="Markdown")
         await state.finish()
-    except: await m.answer("❌ Введіть суму числом.")
+    except: await m.answer("❌ Введіть число.")
 
-# --- ПОПОВНЕННЯ (ВИПРАВЛЕНА ЗАЯВКА) ---
+# --- ПОПОВНЕННЯ (ВИПРАВЛЕНО) ---
 @dp.callback_query_handler(lambda c: c.data == "deposit")
 async def deposit_start(c: types.CallbackQuery):
     await bot.send_message(c.from_user.id, f"💰 Введіть суму в 💎 (мін. {MIN_DEPOSIT}):", reply_markup=cancel_keyboard())
@@ -160,7 +167,7 @@ async def deposit_start(c: types.CallbackQuery):
 async def deposit_amount(m: types.Message, state: FSMContext):
     try:
         amt = float(m.text.replace(',', '.'))
-        if amt < MIN_DEPOSIT: return await m.answer(f"❌ Мінімальна сума {MIN_DEPOSIT} 💎")
+        if amt < MIN_DEPOSIT: return await m.answer(f"❌ Мінімум {MIN_DEPOSIT} 💎")
         
         total_uah = (amt * EXCHANGE_RATE) * (1 + BONUS_PERCENT)
         await state.update_data(deposit_amt=amt)
@@ -185,7 +192,7 @@ async def deposit_receipt(m: types.Message, state: FSMContext):
         InlineKeyboardButton("❌ Відхилити", callback_data=f"no_{m.from_user.id}")
     )
     await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, caption=f"🔔 Чек від {m.from_user.id}\n💎 Сума: {data['deposit_amt']}", reply_markup=kb)
-    await m.answer("✅ Чек надіслано на перевірку!", reply_markup=main_menu())
+    await m.answer("✅ Чек надіслано на перевірку адміну!", reply_markup=main_menu())
     await state.finish()
 
 @dp.callback_query_handler(lambda c: c.data.startswith(('ok_', 'no_')))
@@ -216,7 +223,7 @@ async def withdraw_amount(m: types.Message, state: FSMContext):
         if amt < MIN_WITHDRAW: return await m.answer(f"❌ Мінімум {MIN_WITHDRAW}")
         if u['balance'] < amt: return await m.answer("❌ Мало 💎")
         await state.update_data(wa=amt)
-        await m.answer("Реквізити (Карта + ПІБ):", reply_markup=cancel_keyboard())
+        await m.answer("Введіть реквізити (Карта + ПІБ):", reply_markup=cancel_keyboard())
         await WithdrawState.wait_details.set()
     except: await m.answer("❌ Число!")
 
