@@ -13,7 +13,7 @@ API_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else 0
 
-MOVE_TIMEOUT = 30  # 30 секунд на хід
+MOVE_TIMEOUT = 30  
 EXCHANGE_RATE, BONUS_PERCENT = 44.50, 0.05
 MIN_DEPOSIT, MIN_WITHDRAW, MIN_BET = 0.50, 4.0, 0.05
 
@@ -141,11 +141,11 @@ async def balance_view(m: types.Message):
     kb = InlineKeyboardMarkup().add(InlineKeyboardButton("💳 Поповнити", callback_data="deposit"), InlineKeyboardButton("📤 Вивести", callback_data="withdraw_start"))
     await m.answer(f"💎 Баланс: **{round(u['balance'], 2)}**", reply_markup=kb, parse_mode="Markdown")
 
-# --- ВИВЕДЕННЯ (З АДМІН-ПАНЕЛЛЮ) ---
+# --- ВИВЕДЕННЯ (ОНОВЛЕНО: IBAN, ІПН, ПІБ) ---
 @dp.callback_query_handler(lambda c: c.data == "withdraw_start", state="*")
 async def withdraw_init(c: types.CallbackQuery, state: FSMContext):
     await state.finish()
-    await bot.send_message(c.from_user.id, f"📤 Мінімальний вивід {MIN_WITHDRAW} 💎. Введіть суму:", reply_markup=cancel_keyboard())
+    await bot.send_message(c.from_user.id, f"📤 Мінімальний вивід {MIN_WITHDRAW} 💎.\nВведіть суму для виведення:", reply_markup=cancel_keyboard())
     await WithdrawState.wait_amount.set()
     await c.answer()
 
@@ -154,21 +154,31 @@ async def withdraw_amount(m: types.Message, state: FSMContext):
     try:
         amt = float(m.text.replace(',', '.'))
         u = await users_col.find_one({"_id": m.from_user.id})
-        if amt < MIN_WITHDRAW: return await m.answer(f"❌ Мінімум: {MIN_WITHDRAW} 💎")
-        if u['balance'] < amt: return await m.answer("❌ Недостатньо коштів.")
+        if amt < MIN_WITHDRAW: return await m.answer(f"❌ Мінімальна сума: {MIN_WITHDRAW} 💎")
+        if u['balance'] < amt: return await m.answer("❌ Недостатньо коштів на балансі.")
         await state.update_data(wa=amt)
-        await m.answer("Введіть реквізити (Карта + ПІБ):", reply_markup=cancel_keyboard())
+        await m.answer("📝 Введіть дані для виплати одним повідомленням:\n\n1. **IBAN** (UA...)\n2. **ІПН** (10 цифр)\n3. **ПІБ** отримувача", parse_mode="Markdown", reply_markup=cancel_keyboard())
         await WithdrawState.wait_details.set()
-    except: await m.answer("❌ Введіть число.")
+    except: await m.answer("❌ Введіть коректне число.")
 
 @dp.message_handler(state=WithdrawState.wait_details)
 async def withdraw_final(m: types.Message, state: FSMContext):
     d = await state.get_data()
     amt = d['wa']
     await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -amt}})
-    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("✅ Оплачено", callback_data=f"w_ok_{m.from_user.id}_{amt}"), InlineKeyboardButton("❌ Відхилити", callback_data=f"w_no_{m.from_user.id}_{amt}"))
-    await bot.send_message(ADMIN_ID, f"📤 **ВИВІД**\nЮзер: `{m.from_user.id}`\nСума: {amt}\nРеквізити: {m.text}", reply_markup=kb, parse_mode="Markdown")
-    await m.answer("✅ Заявка на вивід надіслана адміну.", reply_markup=main_menu())
+    
+    kb = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("✅ Виплачено", callback_data=f"w_ok_{m.from_user.id}_{amt}"),
+        InlineKeyboardButton("❌ Відхилити", callback_data=f"w_no_{m.from_user.id}_{amt}")
+    )
+    
+    admin_msg = (f"📤 **ЗАЯВКА НА ВИВІД**\n"
+                 f"👤 Гравець: `{m.from_user.id}`\n"
+                 f"💰 Сума: {amt} 💎\n\n"
+                 f"📋 **Реквізити:**\n{m.text}")
+    
+    await bot.send_message(ADMIN_ID, admin_msg, reply_markup=kb, parse_mode="Markdown")
+    await m.answer("✅ Заявка на виведення надіслана адміну на перевірку.", reply_markup=main_menu())
     await state.finish()
 
 @dp.callback_query_handler(lambda c: c.data.startswith(('w_ok_', 'w_no_')), state="*")
@@ -177,14 +187,14 @@ async def admin_withdraw_decision(c: types.CallbackQuery):
     p = c.data.split("_")
     action, user_id, amt = p[1], int(p[2]), float(p[3])
     if action == "ok":
-        try: await bot.send_message(user_id, f"✅ Вивід {amt} 💎 виконано!")
+        try: await bot.send_message(user_id, f"✅ Ваша заявка на виведення {amt} 💎 успішно виконана!")
         except: pass
-        await c.message.edit_text(c.message.text + "\n\n✅ ВИКОНАНО")
+        await c.message.edit_text(c.message.text + "\n\n✅ **СТАТУС: ВИПЛАЧЕНО**")
     else:
         await users_col.update_one({"_id": user_id}, {"$inc": {"balance": amt}})
-        try: await bot.send_message(user_id, f"❌ Вивід {amt} 💎 відхилено. Кошти повернено.")
+        try: await bot.send_message(user_id, f"❌ Ваша заявка на виведення {amt} 💎 відхилена. Кошти повернено на баланс.")
         except: pass
-        await c.message.edit_text(c.message.text + "\n\n❌ ВІДХИЛЕНО")
+        await c.message.edit_text(c.message.text + "\n\n❌ **СТАТУС: ВІДХИЛЕНО (Повернено)**")
     await c.answer()
 
 # --- ПОПОВНЕННЯ ---
