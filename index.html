@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body { font-family: sans-serif; background: #1c1c1c; color: white; text-align: center; }
+        .grid { display: grid; gap: 10px; margin: 20px auto; max-width: 300px; }
+        .cell { width: 80px; height: 80px; background: #333; border-radius: 10px; font-size: 2em; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+        .cell:active { background: #444; }
+        #status { margin-top: 20px; font-size: 1.2em; color: #00d2ff; }
+    </style>
+</head>
+<body>
+    <h3>❌ Tic Tac Toe ⭕️</h3>
+    <div id="grid" class="grid"></div>
+    <div id="status">Завантаження гри...</div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const gameId = urlParams.get('gid');
+
+        // Малюємо поле 3х3 (спрощено)
+        const grid = document.getElementById('grid');
+        const status = document.getElementById('status');
+        grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
+
+        for (let i = 0; i < 9; i++) {
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            cell.onclick = () => makeMove(i);
+            grid.appendChild(cell);
+        }
+
+        status.innerText = `Гра ID: ${gameId}`;
+
+        function makeMove(index) {
+            // Тут має бути запит до вашого серверу через fetch()
+            tg.HapticFeedback.impactOccurred('medium');
+            console.log("Хід у клітинку:", index);
+        }
+    </script>
+</body>
+</html>
