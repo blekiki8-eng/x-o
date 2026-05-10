@@ -52,6 +52,11 @@ def modes_choice_kb():
 def cancel_kb():
     return ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton("❌ Скасувати"))
 
+def get_board_markup(game_id, board, size):
+    markup = InlineKeyboardMarkup(row_width=size)
+    btns = [InlineKeyboardButton(board[i] if board[i] != " " else "⬜️", callback_data=f"st:{game_id}:{i}") for i in range(size*size)]
+    return markup.add(*btns)
+
 # --- ДОПОМІЖНІ ФУНКЦІЇ ---
 async def get_u(m):
     uid = m.from_user.id
@@ -61,7 +66,53 @@ async def get_u(m):
         await users_col.insert_one(u)
     return u
 
-# --- ПРОФІЛЬ (ВІДНОВЛЕНО) ---
+# --- ВХІД В ГРУ (ОБРОБКА ПОСИЛАННЯ) ---
+@dp.message_handler(commands=['start'], state="*")
+async def start(m: types.Message, state: FSMContext):
+    await state.finish()
+    u = await get_u(m)
+    
+    args = m.get_args()
+    if args and args.startswith("game_"):
+        gid = args.replace("game_", "")
+        g = await games_col.find_one({"game_id": gid, "status": "waiting"})
+        
+        if not g:
+            return await m.answer("❌ Гра не знайдена або вже почалася.", reply_markup=main_menu(m.from_user.id))
+        
+        if g['creator_id'] == m.from_user.id:
+            return await m.answer("⏳ Це ваша гра. Очікуйте суперника.")
+
+        # ПЕРЕВІРКА КОШТІВ У ДРУГА
+        if u['balance'] < g['bet']:
+            # ПОВЕРНЕННЯ КОШТІВ ТВОРЦЮ
+            await users_col.update_one({"_id": g['creator_id']}, {"$inc": {"balance": g['bet']}})
+            # ВИДАЛЕННЯ ГРИ
+            await games_col.delete_one({"game_id": gid})
+            
+            await bot.send_message(g['creator_id'], f"❌ У суперника не вистачає коштів, кошти повернуті на баланс ({g['bet']} 💎).")
+            return await m.answer("❌ У вас недостатньо коштів для гри!", reply_markup=main_menu(m.from_user.id))
+
+        # ЯКЩО КОШТІВ ВИСТАЧАЄ — ПОЧИНАЄМО
+        await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -g['bet']}})
+        
+        board_markup = get_board_markup(gid, g['board'], g['size'])
+        
+        m_op = await m.answer(f"🎮 Гра почалася!\nВи граєте за ⭕️", reply_markup=board_markup)
+        m_cr = await bot.send_message(g['creator_id'], f"🎮 Суперник приєднався! Ваш хід (❌)", reply_markup=board_markup)
+        
+        await games_col.update_one({"game_id": gid}, {"$set": {
+            "opponent_id": m.from_user.id,
+            "opponent_msg_id": m_op.message_id,
+            "creator_msg_id": m_cr.message_id,
+            "status": "playing",
+            "turn": g['creator_id']
+        }})
+        return
+
+    await m.answer(f"Вітаємо, {u['nickname']}!", reply_markup=main_menu(m.from_user.id))
+
+# --- ПРОФІЛЬ ---
 @dp.message_handler(lambda m: m.text == "👤 Профіль", state="*")
 async def profile(m: types.Message):
     u = await get_u(m)
@@ -73,7 +124,7 @@ async def profile(m: types.Message):
     )
     await m.answer(text, parse_mode="Markdown")
 
-# --- ПОПОВНЕННЯ ТА КВИТАНЦІЇ (ВИПРАВЛЕНО) ---
+# --- ПОПОВНЕННЯ ---
 @dp.message_handler(lambda m: m.text == "💎 Баланс", state="*")
 async def balance_menu(m: types.Message):
     u = await get_u(m)
@@ -95,13 +146,7 @@ async def dep_amount(m: types.Message, state: FSMContext):
         if amt < 0.50: return await m.answer("❌ Мінімум 0.50!")
         uah = round((amt * RATE) * 1.05, 2)
         await state.update_data(diamonds=amt)
-        text = (
-            f"Заявка на поповнення балансу:\n"
-            f"1💎= {RATE}₴\n"
-            f"До оплати: {uah}₴ [+5%]\n\n"
-            f"`5355 2800 2890 2177`\n\n"
-            f"(Для підтвердження оплати обовʼязково скиньте квитанцію)"
-        )
+        text = f"Заявка на поповнення:\n1💎= {RATE}₴\nДо оплати: {uah}₴ [+5%]\n\n`5355 2800 2890 2177`"
         await m.answer(text, parse_mode="Markdown", reply_markup=cancel_kb())
         await DepositState.wait_receipt.set()
     except: await m.answer("❌ Введіть число!")
@@ -109,21 +154,11 @@ async def dep_amount(m: types.Message, state: FSMContext):
 @dp.message_handler(state=DepositState.wait_receipt, content_types=['photo'])
 async def dep_receipt(m: types.Message, state: FSMContext):
     data = await state.get_data()
-    diamonds = data['diamonds']
-    
-    # Кнопки для адміна (БЕЗ ПОМИЛОК)
     kb = InlineKeyboardMarkup().add(
-        InlineKeyboardButton("✅ Схвалити", callback_data=f"payok:{m.from_user.id}:{diamonds}"),
+        InlineKeyboardButton("✅ Схвалити", callback_data=f"payok:{m.from_user.id}:{data['diamonds']}"),
         InlineKeyboardButton("❌ Відхилити", callback_data=f"payno:{m.from_user.id}")
     )
-    
-    await bot.send_photo(
-        ADMIN_ID, 
-        m.photo[-1].file_id, 
-        caption=f"💰 Квитанція на {diamonds} 💎\nВід: {m.from_user.full_name}\nID: `{m.from_user.id}`",
-        reply_markup=kb,
-        parse_mode="Markdown"
-    )
+    await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, caption=f"💰 Депозит {data['diamonds']} 💎 від {m.from_user.full_name}", reply_markup=kb)
     await m.answer("✅ Очікуйте (до 60хв.)", reply_markup=main_menu(m.from_user.id))
     await state.finish()
 
@@ -131,27 +166,17 @@ async def dep_receipt(m: types.Message, state: FSMContext):
 @dp.callback_query_handler(lambda c: c.data.startswith(("payok:", "payno:")), state="*")
 async def admin_pay_manage(c: types.CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
-    
     data = c.data.split(":")
-    action = data[0]
-    user_id = int(data[1])
-
-    if action == "payok":
-        amount = float(data[2])
-        await users_col.update_one({"_id": user_id}, {"$inc": {"balance": amount}})
-        try:
-            await bot.send_message(user_id, f"✅ Ваша заявка схвалена! Нараховано {amount} 💎")
-        except: pass
-        await c.answer("Нараховано!")
+    uid, act = int(data[1]), data[0]
+    if act == "payok":
+        amt = float(data[2])
+        await users_col.update_one({"_id": uid}, {"$inc": {"balance": amt}})
+        await bot.send_message(uid, f"✅ Нараховано {amt} 💎!")
     else:
-        try:
-            await bot.send_message(user_id, "❌ Ваша заявка на поповнення відхилена.")
-        except: pass
-        await c.answer("Відхилено")
-    
+        await bot.send_message(uid, "❌ Поповнення відхилено.")
     await c.message.delete()
 
-# --- ІГРИ (НИЖНЯ ПАНЕЛЬ) ---
+# --- ІГРИ (НИЖНІ КНОПКИ) ---
 @dp.message_handler(lambda m: m.text == "🎮 Ігри", state="*")
 async def games_start(m: types.Message):
     await GameState.wait_game_type.set()
@@ -188,8 +213,7 @@ async def game_bet(m: types.Message, state: FSMContext):
         if u['balance'] < bet: return await m.answer("❌ Недостатньо балансу!")
         
         data = await state.get_data()
-        size = data['sz']
-        gid = str(uuid.uuid4())[:8]
+        size, gid = data['sz'], str(uuid.uuid4())[:8]
         
         await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -bet}})
         await games_col.insert_one({
@@ -198,12 +222,11 @@ async def game_bet(m: types.Message, state: FSMContext):
         })
         
         link = f"https://t.me/{(await bot.get_me()).username}?start=game_{gid}"
-        await m.answer(f"🎮 Гра {size}x{size} створена!\nСтавка: {bet} 💎\n\nВідправ посилання другу:\n`{link}`", 
-                       parse_mode="Markdown", reply_markup=main_menu(m.from_user.id))
+        await m.answer(f"🎮 Гра {size}x{size} створена!\nСтавка: {bet} 💎\n\n`{link}`", parse_mode="Markdown", reply_markup=main_menu(m.from_user.id))
         await state.finish()
     except: await m.answer("❌ Введіть число!")
 
-# --- ЗАГАЛЬНЕ СКАСУВАННЯ ---
+# --- СКАСУВАННЯ ---
 @dp.message_handler(lambda m: m.text == "❌ Скасувати", state="*")
 async def global_cancel(m: types.Message, state: FSMContext):
     await state.finish()
