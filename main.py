@@ -13,7 +13,7 @@ API_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else 0
 
-RATE = 44.50  # Курс 1💎 = 44.50 грн
+RATE = 44.50 
 logging.basicConfig(level=logging.INFO)
 storage = MemoryStorage()
 bot = Bot(token=API_TOKEN)
@@ -145,7 +145,6 @@ async def dice_handler(m: types.Message):
     else:
         o_t.append(val)
         if len(o_t) >= max_r:
-            # ФІНАЛ
             cs, os = sum(c_t), sum(o_t)
             win = round(g['bet'] * 2, 2)
             await games_col.update_one({"game_id": gid}, {"$set": {"status": "finished", "o_throws": o_t}})
@@ -198,8 +197,16 @@ async def dep_amt(m: types.Message, state: FSMContext):
 @dp.message_handler(state=DepositState.wait_receipt, content_types=['photo'])
 async def dep_rec(m: types.Message, state: FSMContext):
     d = await state.get_data()
+    user_mention = f"@{m.from_user.username}" if m.from_user.username else f"[{m.from_user.id}](tg://user?id={m.from_user.id})"
+    
     kb = InlineKeyboardMarkup().add(InlineKeyboardButton("✅ Підтвердити", callback_data=f"adm_ok:{m.from_user.id}:{d['amt']}"))
-    await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, caption=f"Поповнення {d['amt']} 💎 від {m.from_user.id}", reply_markup=kb)
+    
+    admin_msg = (f"💰 **НОВЕ ПОПОВНЕННЯ**\n\n"
+                 f"👤 Користувач: {user_mention}\n"
+                 f"🆔 ID: `{m.from_user.id}`\n"
+                 f"💎 Сума: {d['amt']} 💎")
+                 
+    await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, caption=admin_msg, parse_mode="Markdown", reply_markup=kb)
     await m.answer("✅ Заявка надіслана. Очікуйте нарахування.", reply_markup=main_menu(m.from_user.id))
     await state.finish()
 
@@ -224,12 +231,20 @@ async def w_amt(m: types.Message, state: FSMContext):
 @dp.message_handler(state=WithdrawState.wait_details)
 async def w_fin(m: types.Message, state: FSMContext):
     d = await state.get_data()
+    user_mention = f"@{m.from_user.username}" if m.from_user.username else f"[{m.from_user.id}](tg://user?id={m.from_user.id})"
+    
     await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -d['amt']}})
-    await bot.send_message(ADMIN_ID, f"📤 **ЗАПИТ НА ВИВІД**\n\nСума: {d['amt']} 💎\nКористувач: {m.from_user.id}\nДані:\n{m.text}")
+    
+    admin_msg = (f"📤 **ЗАПИТ НА ВИВІД**\n\n"
+                 f"👤 Користувач: {user_mention}\n"
+                 f"🆔 ID: `{m.from_user.id}`\n"
+                 f"💎 Сума: {d['amt']} 💎\n\n"
+                 f"📝 **Дані:**\n{m.text}")
+                 
+    await bot.send_message(ADMIN_ID, admin_msg, parse_mode="Markdown")
     await m.answer("✅ Заявку прийнято. Виплата протягом 24 годин.", reply_markup=main_menu(m.from_user.id))
     await state.finish()
 
-# --- АДМІН-ПІДТВЕРДЖЕННЯ ---
 @dp.callback_query_handler(lambda c: c.data.startswith("adm_ok:"), state="*")
 async def admin_ok(c: types.CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
