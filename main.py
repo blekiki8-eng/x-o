@@ -7,12 +7,12 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
+# --- НАЛАШТУВАННЯ ---
 load_dotenv()
 API_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else 0
 
-RATE = 44.50
 logging.basicConfig(level=logging.INFO)
 storage = MemoryStorage()
 bot = Bot(token=API_TOKEN)
@@ -24,7 +24,6 @@ users_col = db["users"]
 games_col = db["games"]
 
 class GameState(StatesGroup):
-    wait_mode = State()
     wait_bet = State()
 
 def main_menu(user_id):
@@ -42,17 +41,17 @@ async def get_u(user_id):
         await users_col.insert_one(u)
     return u
 
-# --- ГОЛОВНА ЛОГІКА КИДКА ---
+# --- ЛОГІКА ХОДІВ ---
 @dp.message_handler(content_types=types.ContentTypes.DICE, state="*")
 async def handle_bowling_dice(m: types.Message):
     if m.dice.emoji != "🎳": return
     
     uid = m.from_user.id
-    # ВАЖЛИВО: шукаємо гру тільки зі статусом 'playing'
+    # Шукаємо ТІЛЬКИ активну гру (status: playing)
     g = await games_col.find_one({"status": "playing", "$or": [{"creator_id": uid}, {"opponent_id": uid}]})
     
     if not g:
-        return # Бот ігнорує кидок, якщо гра не почалася або вже завершена
+        return  # Ігноруємо кидок, якщо гра ще не почалася або вже закінчена
 
     if g.get('turn') != uid:
         return await m.answer("Зараз не ваш хід! Зачекайте суперника.")
@@ -61,23 +60,24 @@ async def handle_bowling_dice(m: types.Message):
     cid, oid = g['creator_id'], g['opponent_id']
     gid = g['game_id']
     
+    # ХІД ГРАВЦЯ 1 (СТВОРЮВАЧ)
     if uid == cid:
-        # Хід Гравця 1
         await games_col.update_one({"game_id": gid}, {"$set": {"c_score": val, "turn": oid}})
         
+        # Повідомлення для Гравця 1
         await bot.send_message(cid, f"У вас вибило {val}")
         await bot.send_message(cid, "Тепер хід суперника ⏳")
         
+        # Повідомлення для Гравця 2
         await bot.send_message(oid, f"У суперника випало {val}")
-        await bot.send_message(oid, "Тепер ваш хід 🎳 (натисніть, щоб скопіювати): `🎳`", parse_mode="Markdown")
+        await bot.send_message(oid, "Тепер ваш хід 🎳 (натисніть, щоб копіювати): `🎳`", parse_mode="Markdown")
     
+    # ХІД ГРАВЦЯ 2 (ПРИЄДНАНИЙ)
     else:
-        # Хід Гравця 2
         c_score = g.get('c_score', 0)
         o_score = val
         win_sum = round(g['bet'] * 2, 2)
         
-        # Визначаємо переможця
         if c_score > o_score:
             await users_col.update_one({"_id": cid}, {"$inc": {"balance": win_sum}})
             res_c, res_o = "Вітаю 🎉 Ви перемогли!", "Нажаль ви програли 😢"
@@ -88,48 +88,48 @@ async def handle_bowling_dice(m: types.Message):
             await users_col.update_many({"_id": {"$in": [cid, oid]}}, {"$inc": {"balance": g['bet']}})
             res_c = res_o = "Нічия! Ставки повернуто 🤝"
 
-        # Фінальне повідомлення для Гравця 1
+        # Фінал для Гравця 1
         await bot.send_message(cid, f"Результат:\n\nВи: {c_score}\nСуперник: {o_score}\n\n{res_c}")
-        # Фінальне повідомлення для Гравця 2
+        # Фінал для Гравця 2
         await bot.send_message(oid, f"Результат:\n\nВи: {o_score}\nСуперник: {c_score}\n\n{res_o}")
         
         await games_col.update_one({"game_id": gid}, {"$set": {"status": "finished"}})
 
-# --- ПРИЄДНАННЯ (СТАРТ ГРИ) ---
+# --- СТАРТ ТА ПРИЄДНАННЯ ---
 @dp.message_handler(commands=['start'], state="*")
 async def start_cmd(m: types.Message, state: FSMContext):
     args = m.get_args()
+    uid = m.from_user.id
     if args and args.startswith("game_"):
         gid = args.replace("game_", "")
         g = await games_col.find_one({"game_id": gid, "status": "waiting"})
-        u = await get_u(m.from_user.id)
+        u = await get_u(uid)
         
-        if g and g['creator_id'] != m.from_user.id:
+        if g and g['creator_id'] != uid:
             if u['balance'] < g['bet']: return await m.answer("❌ Недостатньо коштів!")
             
-            # Оновлюємо статус на 'playing' - ТІЛЬКИ ТЕПЕР БОТ РЕАГУВАТИМЕ НА КИДКИ
-            await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -g['bet']}})
-            await games_col.update_one({"game_id": gid}, {"$set": {"opponent_id": m.from_user.id, "status": "playing", "turn": g['creator_id']}})
+            await users_col.update_one({"_id": uid}, {"$inc": {"balance": -g['bet']}})
+            await games_col.update_one({"game_id": gid}, {"$set": {"opponent_id": uid, "status": "playing", "turn": g['creator_id']}})
             
             info = f"Два гравці в зборі ✅\nГра: Боулінг 🎳\nСтавка: {g['bet']} 💎\nВиграш: {round(g['bet']*2, 2)} 💎"
             
             await bot.send_message(g['creator_id'], info)
-            await bot.send_message(m.from_user.id, info)
+            await bot.send_message(uid, info)
             
             await bot.send_message(g['creator_id'], "Ваш хід 🎳")
-            await bot.send_message(m.from_user.id, "Чекаємо на хід суперника...")
+            await bot.send_message(uid, "Чекаємо на хід суперника...")
             return
 
-    await m.answer("Привіт! Оберіть режим у меню.", reply_markup=main_menu(m.from_user.id))
+    await m.answer("Привіт! Оберіть режим у меню.", reply_markup=main_menu(uid))
 
 # --- СТВОРЕННЯ ГРИ ---
 @dp.message_handler(lambda m: m.text == "🎮 Боулінг", state="*")
-async def create_game_start(m: types.Message):
+async def create_game(m: types.Message):
     await GameState.wait_bet.set()
     await m.answer("Введіть ставку 💎:", reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add("❌ Скасувати"))
 
 @dp.message_handler(state=GameState.wait_bet)
-async def create_game_fin(m: types.Message, state: FSMContext):
+async def set_bet(m: types.Message, state: FSMContext):
     if m.text == "❌ Скасувати":
         await state.finish()
         return await m.answer("Скасовано", reply_markup=main_menu(m.from_user.id))
@@ -142,19 +142,22 @@ async def create_game_fin(m: types.Message, state: FSMContext):
         gid = str(uuid.uuid4())[:8]
         await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -bet}})
         await games_col.insert_one({
-            "game_id": gid, 
-            "creator_id": m.from_user.id, 
-            "bet": bet, 
-            "status": "waiting", 
-            "mode": 1
+            "game_id": gid, "creator_id": m.from_user.id, "bet": bet, 
+            "status": "waiting", "c_score": 0, "o_score": 0
         })
         
-        bot_user = await bot.get_me()
-        link = f"https://t.me/{bot_user.username}?start=game_{gid}"
+        bot_u = await bot.get_me()
+        link = f"https://t.me/{bot_u.username}?start=game_{gid}"
         await m.answer(f"🎳 Гра створена!\nНадішліть посилання другу:\n`{link}`", parse_mode="Markdown", reply_markup=main_menu(m.from_user.id))
         await state.finish()
     except:
         await m.answer("Введіть число!")
+
+# --- СИСТЕМА БАЛАНСУ ---
+@dp.message_handler(lambda m: m.text == "💎 Баланс", state="*")
+async def balance(m: types.Message):
+    u = await get_u(m.from_user.id)
+    await m.answer(f"💰 Ваш баланс: {round(u['balance'], 2)} 💎")
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
