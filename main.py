@@ -52,72 +52,69 @@ def cancel_kb():
 async def get_u(user_id, name="Користувач"):
     u = await users_col.find_one({"_id": user_id})
     if not u:
-        u = {"_id": user_id, "nickname": name, "balance": 0.0, "invited_by": None, "referrals_count": 0, "total_deposited": 0.0}
+        u = {"_id": user_id, "nickname": name, "balance": 0.0, "total_deposited": 0.0}
         await users_col.insert_one(u)
     return u
 
-# --- СКАСУВАННЯ ---
-@dp.message_handler(lambda m: m.text == "❌ Скасувати", state="*")
-async def cancel_handler(m: types.Message, state: FSMContext):
-    if await state.get_state():
-        await state.finish()
-        await m.answer("Дію скасовано.", reply_markup=main_menu(m.from_user.id))
-
-# --- ЛОГІКА ГРИ (БОУЛІНГ) ---
+# --- ОБРОБКА КИДКА БОУЛІНГА ---
 @dp.message_handler(content_types=types.ContentTypes.DICE, state="*")
 async def handle_bowling_dice(m: types.Message):
     if m.dice.emoji != "🎳": return
     
     uid = m.from_user.id
+    # Шукаємо активну гру
     g = await games_col.find_one({"status": "playing", "$or": [{"creator_id": uid}, {"opponent_id": uid}]})
     
-    if not g or g['turn'] != uid: return
+    if not g: return
+    if g.get('turn') != uid:
+        return await m.answer("Зараз не ваш хід! Очікуйте суперника.")
 
     val = m.dice.value
     cid, oid = g['creator_id'], g['opponent_id']
     gid = g['game_id']
+    mode = g.get('mode', 1)
     
-    # ХІД ГРАВЦЯ 1 (ТВОРЕЦЬ)
     if uid == cid:
+        # Хід Гравця 1
         new_score = g.get('c_score', 0) + val
         await games_col.update_one({"game_id": gid}, {"$set": {"c_score": new_score, "turn": oid}})
         
         await bot.send_message(cid, f"У вас вибило {val}, тепер ходить суперник")
-        await bot.send_message(oid, f"У суперника випало {val}, тепер ваш хід `🎳` (натисніть щоб копіювати)", parse_mode="MarkdownV2")
+        await bot.send_message(oid, f"У суперника випало {val}, тепер ваш хід `🎳` (натисніть щоб копіювати)", parse_mode="Markdown")
     
-    # ХІД ГРАВЦЯ 2 (СУПЕРНИК)
     else:
+        # Хід Гравця 2
         new_score = g.get('o_score', 0) + val
         rounds_done = g.get('rounds_done', 0) + 1
         
-        if rounds_done >= g['mode']:
-            # ЗАВЕРШЕННЯ ГРИ
+        if rounds_done >= mode:
+            # ФІНАЛ
             win_sum = round(g['bet'] * 2, 2)
-            total_c, total_o = g['c_score'], new_score
+            total_c, total_o = g.get('c_score', 0), new_score
             
-            res_c = f"Результат:\nВи: {total_c}\nСуперник: {total_o}"
-            res_o = f"Результат:\nВи: {total_o}\nСуперник: {total_c}"
+            res_msg = f"Результат:\nВи: {{y}}\nСуперник: {{o}}"
             
             if total_c > total_o:
                 await users_col.update_one({"_id": cid}, {"$inc": {"balance": win_sum}})
-                await bot.send_message(cid, f"У суперника вибило {val}\n\n{res_c}\n\nВітаю ви виграли {win_sum} 💎")
-                await bot.send_message(oid, f"У вас вибило {val}\n\n{res_o}\n\nНажаль ви програли")
+                await bot.send_message(cid, f"У суперника вибило {val}\n\n{res_msg.format(y=total_c, o=total_o)}\n\nВітаю ви виграли {win_sum} 💎")
+                await bot.send_message(oid, f"У вас вибило {val}\n\n{res_msg.format(y=total_o, o=total_c)}\n\nНажаль ви програли")
             elif total_o > total_c:
                 await users_col.update_one({"_id": oid}, {"$inc": {"balance": win_sum}})
-                await bot.send_message(oid, f"У вас вибило {val}\n\n{res_o}\n\nВітаю ви виграли {win_sum} 💎")
-                await bot.send_message(cid, f"У суперника вибило {val}\n\n{res_c}\n\nНажаль ви програли")
+                await bot.send_message(oid, f"У вас вибило {val}\n\n{res_msg.format(y=total_o, o=total_c)}\n\nВітаю ви виграли {win_sum} 💎")
+                await bot.send_message(cid, f"У суперника вибило {val}\n\n{res_msg.format(y=total_c, o=total_o)}\n\nНажаль ви програли")
             else:
                 await users_col.update_many({"_id": {"$in": [cid, oid]}}, {"$inc": {"balance": g['bet']}})
-                await bot.send_message(cid, f"Нічия! Обидва вибили однаковий результат. Ставку повернуто.")
-                await bot.send_message(oid, f"Нічия! Обидва вибили однаковий результат. Ставку повернуто.")
+                await bot.send_message(cid, "Нічия! Ставки повернуто.")
+                await bot.send_message(oid, "Нічия! Ставки повернуто.")
             
             await games_col.update_one({"game_id": gid}, {"$set": {"status": "finished"}})
         else:
+            # Наступний раунд
             await games_col.update_one({"game_id": gid}, {"$set": {"o_score": new_score, "turn": cid, "rounds_done": rounds_done}})
             await bot.send_message(oid, f"У вас вибило {val}, тепер ходить суперник")
-            await bot.send_message(cid, f"У суперника випало {val}, тепер ваш хід `🎳` (Матч {rounds_done+1}/{g['mode']})", parse_mode="MarkdownV2")
+            await bot.send_message(cid, f"У суперника випало {val}, тепер ваш хід `🎳` (Матч {rounds_done+1}/{mode})", parse_mode="Markdown")
 
-# --- СТАРТ ТА ПРИЄДНАННЯ ---
+# --- ПРИЄДНАННЯ ДО ГРИ ---
 @dp.message_handler(commands=['start'], state="*")
 async def start_cmd(m: types.Message, state: FSMContext):
     await state.finish()
@@ -130,16 +127,19 @@ async def start_cmd(m: types.Message, state: FSMContext):
         if g and g['creator_id'] != uid:
             if u['balance'] < g['bet']: return await m.answer("❌ Недостатньо коштів!")
             await users_col.update_one({"_id": uid}, {"$inc": {"balance": -g['bet']}})
-            await games_col.update_one({"game_id": gid}, {"$set": {"opponent_id": uid, "status": "playing", "turn": g['creator_id'], "c_score": 0, "o_score": 0, "rounds_done": 0}})
+            await games_col.update_one({"game_id": gid}, {"$set": {
+                "opponent_id": uid, "status": "playing", "turn": g['creator_id'],
+                "c_score": 0, "o_score": 0, "rounds_done": 0
+            }})
             
-            info = f"Нова гра в Боулінг 🎳\nМатчів: {g['mode']}\nСтавка: {g['bet']} 💎\nВиграш: {round(g['bet']*2, 2)} 💎"
-            await bot.send_message(uid, info + "\n\nВи приєдналися! Чекаємо хід суперника.")
+            info = f"Нова гра в Боулінг 🎳\nМатчів: {g['mode']}\nСтавка: {g['bet']} 💎"
+            await bot.send_message(uid, info + "\n\nВи приєдналися! Очікуйте хід суперника.")
             await bot.send_message(g['creator_id'], info + "\n\nСуперник приєднався! Гра почалася.")
-            await bot.send_message(g['creator_id'], "Ваш хід `🎳` (натисніть щоб копіювати)", parse_mode="MarkdownV2")
+            await bot.send_message(g['creator_id'], "Ваш хід `🎳` (натисніть щоб копіювати)", parse_mode="Markdown")
             return
     await m.answer("Вітаємо у Different Games!", reply_markup=main_menu(uid))
 
-# --- СТВОРЕННЯ ГРИ ---
+# --- МЕНЮ СТВОРЕННЯ ГРИ ---
 @dp.message_handler(lambda m: m.text == "🎮 Боулінг", state="*")
 async def bowl_menu(m: types.Message):
     kb = ReplyKeyboardMarkup(resize_keyboard=True).add("1 гра", "5 ігор", "❌ Скасувати")
@@ -148,7 +148,9 @@ async def bowl_menu(m: types.Message):
 
 @dp.message_handler(state=GameState.wait_mode)
 async def bowl_mode(m: types.Message, state: FSMContext):
-    if m.text == "❌ Скасувати": return
+    if m.text == "❌ Скасувати":
+        await state.finish()
+        return await m.answer("Скасовано", reply_markup=main_menu(m.from_user.id))
     mode = 1 if "1" in m.text else 5
     await state.update_data(m=mode)
     await GameState.wait_bet.set()
@@ -156,20 +158,23 @@ async def bowl_mode(m: types.Message, state: FSMContext):
 
 @dp.message_handler(state=GameState.wait_bet)
 async def bowl_bet(m: types.Message, state: FSMContext):
-    if m.text == "❌ Скасувати": return
+    if m.text == "❌ Скасувати":
+        await state.finish()
+        return await m.answer("Скасовано", reply_markup=main_menu(m.from_user.id))
     try:
         bet = round(float(m.text.replace(",", ".")), 2)
         u = await get_u(m.from_user.id)
         if u['balance'] < bet: return await m.answer("❌ Мало коштів!")
-        d = await state.get_data(); gid = str(uuid.uuid4())[:8]
+        d = await state.get_data()
+        gid = str(uuid.uuid4())[:8]
         await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -bet}})
         await games_col.insert_one({"game_id": gid, "creator_id": m.from_user.id, "bet": bet, "mode": d['m'], "status": "waiting"})
         link = f"https://t.me/{(await bot.get_me()).username}?start=game_{gid}"
-        await m.answer(f"🎳 Гра на {d['m']} матч(ів) створена!\nПосилання: `{link}`", parse_mode="Markdown", reply_markup=main_menu(m.from_user.id))
+        await m.answer(f"🎳 Гра створена!\nПосилання: `{link}`", parse_mode="Markdown", reply_markup=main_menu(m.from_user.id))
         await state.finish()
     except: await m.answer("Введіть число!")
 
-# --- БАЛАНС ТА ПОПОВНЕННЯ (ТВІЙ ФОРМАТ) ---
+# --- БАЛАНС ТА ПОПОВНЕННЯ ---
 @dp.message_handler(lambda m: m.text == "💎 Баланс", state="*")
 async def balance_handler(m: types.Message):
     u = await get_u(m.from_user.id)
@@ -183,56 +188,30 @@ async def dep_start(c: types.CallbackQuery):
 
 @dp.message_handler(state=DepositState.wait_amount)
 async def dep_amt(m: types.Message, state: FSMContext):
-    if m.text == "❌ Скасувати": return
+    if m.text == "❌ Скасувати":
+        await state.finish()
+        return await m.answer("Скасовано", reply_markup=main_menu(m.from_user.id))
     try:
         amt = float(m.text.replace(",", "."))
         to_pay = round((amt * RATE) * 1.05, 2)
         await state.update_data(a=amt)
-        text = (f"📝 **Заявка на поповнення**\n1💲= 1 💎 {RATE}\nДо сплати: {to_pay} грн (+5%)\n\n"
-                f"Карта: `5355 2800 2890 2177`\n\n(Обовʼязково квитанцію сюди кидайте)")
+        text = f"📝 Заявка на {amt} 💎\nДо сплати: {to_pay} грн\nКарта: `5355 2800 2890 2177`\nКиньте квитанцію фото:"
         await m.answer(text, parse_mode="Markdown")
         await DepositState.wait_receipt.set()
-    except: await m.answer("Введіть число!")
+    except: await m.answer("Число!")
 
 @dp.message_handler(state=DepositState.wait_receipt, content_types=['photo'])
 async def dep_rec(m: types.Message, state: FSMContext):
     d = await state.get_data()
-    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("✅ Підтвердити", callback_data=f"adm_ok:{m.from_user.id}:{d['a']}"))
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("✅ Ок", callback_data=f"adm_ok:{m.from_user.id}:{d['a']}"))
     await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, caption=f"📥 {d['a']} 💎 від {m.from_user.id}", reply_markup=kb)
-    await m.answer("✅ Надіслано адміну.", reply_markup=main_menu(m.from_user.id))
+    await m.answer("Надіслано адміну.", reply_markup=main_menu(m.from_user.id))
     await state.finish()
 
-# --- ПРОФІЛЬ ТА ВИВІД ---
 @dp.message_handler(lambda m: m.text == "👤 Профіль", state="*")
 async def profile(m: types.Message):
     u = await get_u(m.from_user.id)
-    await m.answer(f"👤 Профіль\n🆔 ID: `{m.from_user.id}`\n💰 Баланс: {round(u['balance'], 2)} 💎", parse_mode="Markdown")
-
-@dp.callback_query_handler(lambda c: c.data == "withdr", state="*")
-async def withdr_start(c: types.CallbackQuery):
-    await WithdrawState.wait_amount.set()
-    await bot.send_message(c.from_user.id, "Введіть суму виводу 💎:", reply_markup=cancel_kb())
-
-@dp.message_handler(state=WithdrawState.wait_amount)
-async def withdr_amt(m: types.Message, state: FSMContext):
-    if m.text == "❌ Скасувати": return
-    try:
-        amt = float(m.text.replace(",", "."))
-        u = await get_u(m.from_user.id)
-        if u['balance'] < amt: return await m.answer("❌ Мало коштів!")
-        await state.update_data(a=amt)
-        await m.answer("Введіть номер карти:", reply_markup=cancel_kb())
-        await WithdrawState.wait_details.set()
-    except: await m.answer("Введіть число!")
-
-@dp.message_handler(state=WithdrawState.wait_details)
-async def withdr_fin(m: types.Message, state: FSMContext):
-    if m.text == "❌ Скасувати": return
-    d = await state.get_data()
-    await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -d['a']}})
-    await bot.send_message(ADMIN_ID, f"📤 **ВИВІД**\n💎 {d['a']} 💎\n💳 `{m.text}`\n🆔 {m.from_user.id}")
-    await m.answer("✅ Заявку прийнято.", reply_markup=main_menu(m.from_user.id))
-    await state.finish()
+    await m.answer(f"👤 ID: `{m.from_user.id}`\n💰 Баланс: {round(u['balance'], 2)} 💎", parse_mode="Markdown")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("adm_ok:"), state="*")
 async def admin_ok(c: types.CallbackQuery):
