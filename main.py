@@ -88,9 +88,20 @@ async def admin_bonus(m: types.Message, command: CommandObject):
     try:
         uid, amt = command.args.split()
         uid, amt = int(uid), float(amt)
+        
+        # Перевірка балансу адмін-панелі
+        stats = await stats_col.find_one({"_id": "global"})
+        current_profit = stats.get("admin_profit", 0.0) if stats else 0.0
+        
+        if current_profit < amt:
+            return await m.answer(f"❌ На балансі адмін-панелі недостатньо коштів! (Доступно: {current_profit:.2f})")
+        
+        # Знімаємо з адмінки і даємо юзеру
+        await add_admin_profit(-amt)
         await users_col.update_one({"_id": uid}, {"$inc": {"balance": amt}})
-        await m.answer(f"🏆 Бонус {amt} 💎 нараховано топу `{uid}`")
-        await bot.send_message(uid, f"🏆 Вітаємо! Ви отримали бонус `{amt}` 💎 як топ-гравець!")
+        
+        await m.answer(f"🏆 Бонус {amt} 💎 знято з адмін-панелі та нараховано `{uid}`")
+        await bot.send_message(uid, f"🏆 Вітаємо! Ви отримали бонус `{amt}` 💎!")
     except: await m.answer("Формат: `/bonus ID сума`")
 
 # --- ПРОФІЛЬ ТА МЕНЮ ---
@@ -110,7 +121,7 @@ async def profile_cmd(m: types.Message):
     u = await get_u(m.from_user.id)
     text = (f"👤 **Профіль:**\n\n🆔 Id: `{m.from_user.id}`\n💰 Баланс: `{u.get('balance', 0.0):.2f}` 💎\n\n"
             f"Запрошених гравців: `{u.get('referals_count', 0)}`👤\n"
-            f"Оборот: `{u.get('turnover', 0.0):.2f}` 💎\n"
+            f"Оборот (тільки виграші): `{u.get('turnover', 0.0):.2f}` 💎\n"
             f"Зіграно ігор: `{u.get('games_played', 0)}` 🎳")
     await m.answer(text, parse_mode="Markdown")
 
@@ -127,16 +138,11 @@ async def admin_panel_cb(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID: return
     stats = await stats_col.find_one({"_id": "global"})
     profit = stats.get("admin_profit", 0.0) if stats else 0.0
-    
-    # Виправлений топ-10 з обробкою KeyError
     top_users = await users_col.find().sort("turnover", -1).limit(10).to_list(10)
     top_text = "\n".join([f"{i+1}. `{u['_id']}` — {u.get('turnover', 0.0):.2f}" for i, u in enumerate(top_users)])
-    
-    text = (f"👨‍💻 **Адмін Панель**\n\n📈 Дохід з виграшів: `{profit:.4f}` 💎\n\n"
-            f"🏆 **Топ-10 по обороту:**\n{top_text if top_text else 'Гравців ще немає'}")
-    
-    try:
-        await cb.message.edit_text(text, parse_mode="Markdown")
+    text = (f"👨‍💻 **Адмін Панель**\n\n📈 Дохід системи: `{profit:.4f}` 💎\n\n"
+            f"🏆 **Топ-10 (за виграним оборотом):**\n{top_text if top_text else 'Гравців ще немає'}")
+    try: await cb.message.edit_text(text, parse_mode="Markdown")
     except: pass
 
 # --- ЛОГІКА ІГОР ---
@@ -184,8 +190,9 @@ async def join_game_logic(m, gid):
     u2 = await get_u(m.from_user.id)
     if u2.get('balance', 0.0) < g['bet']: return await m.answer("❌ Мало коштів")
     
+    # Списуємо ставку (оборот тут ще НЕ нараховуємо)
     await users_col.update_many({"_id": {"$in": [g['creator_id'], m.from_user.id]}}, 
-                                {"$inc": {"balance": -g['bet'], "turnover": g['bet'], "games_played": 1}})
+                                {"$inc": {"balance": -g['bet'], "games_played": 1}})
     
     await games_col.update_one({"game_id": gid}, {"$set": {"opponent_id": m.from_user.id, "status": "playing", "turn": g['creator_id']}})
     await bot.send_message(g['creator_id'], f"Гра створена ✅\nВаш хід! Кидайте {g['type']}")
@@ -202,7 +209,6 @@ async def handle_game_dice(m: types.Message):
     next_p = g['opponent_id'] if is_c else g['creator_id']
     
     await games_col.update_one({"game_id": g['game_id']}, {"$push": {f_add: val}, "$set": {"turn": next_p}})
-    
     await bot.send_dice(next_p, emoji=g['type'])
     await bot.send_message(next_p, f"Супернику випало {val}, тепер ваш хід!")
 
@@ -217,6 +223,7 @@ async def process_finish(g, s1, s2):
     adm_share = g['bet'] * 0.01
 
     if s1 == s2:
+        # Нічия - просто повертаємо ставки
         for uid in [g['creator_id'], g['opponent_id']]:
             await users_col.update_one({"_id": uid}, {"$inc": {"balance": g['bet']}})
             await bot.send_message(uid, f"Результат {s1}:{s2} — Нічия! Ставки повернуто.")
@@ -225,7 +232,9 @@ async def process_finish(g, s1, s2):
         lose_id = g['opponent_id'] if s1 > s2 else g['creator_id']
         w_score, l_score = (s1, s2) if s1 > s2 else (s2, s1)
         
-        await users_col.update_one({"_id": win_id}, {"$inc": {"balance": win_sum}})
+        # Нараховуємо баланс ТА оборот ТІЛЬКИ переможцю
+        await users_col.update_one({"_id": win_id}, {"$inc": {"balance": win_sum, "turnover": g['bet']}})
+        
         u_win = await users_col.find_one({"_id": win_id})
         ref = u_win.get("referrer")
         
