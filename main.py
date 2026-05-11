@@ -66,21 +66,22 @@ STRINGS = {
     }
 }
 
-# --- СТАНИ ---
 class UserStates(StatesGroup):
     wait_support = State()
     wait_withdraw = State()
-    wait_bet = State()
 
 class AdminStates(StatesGroup):
     wait_reply = State()
 
-# --- ФУНКЦІЇ ---
 async def get_u(uid):
     u = await users_col.find_one({"_id": uid})
     if not u:
         u = {"_id": uid, "balance": 0.0, "referals_count": 0, "turnover": 0.0, "games_played": 0, "lang": "ua", "is_blocked": False}
         await users_col.insert_one(u)
+    # Якщо юзер є, але немає поля lang, додаємо його
+    if 'lang' not in u:
+        u['lang'] = 'ua'
+        await users_col.update_one({"_id": uid}, {"$set": {"lang": "ua"}})
     return u
 
 def main_kb(uid, lang='ua'):
@@ -98,43 +99,43 @@ def main_kb(uid, lang='ua'):
 async def cmd_start(m: types.Message, state: FSMContext):
     await state.clear()
     u = await get_u(m.from_user.id)
-    await m.answer(STRINGS[u['lang']]['start'], reply_markup=main_kb(m.from_user.id, u['lang']))
+    lang = u.get('lang', 'ua')
+    await m.answer(STRINGS[lang]['start'], reply_markup=main_kb(m.from_user.id, lang))
 
-# ПРОФІЛЬ
 @dp.message(F.text == "👤 Профіль")
 async def profile_cmd(m: types.Message):
     u = await get_u(m.from_user.id)
-    l = u['lang']
-    txt = STRINGS[l]['profile'].format(id=m.from_user.id, bal=u['balance'], ref=u['referals_count'], turn=u['turnover'], games=u['games_played'])
+    lang = u.get('lang', 'ua')
+    txt = STRINGS[lang]['profile'].format(id=m.from_user.id, bal=u['balance'], ref=u['referals_count'], turn=u['turnover'], games=u['games_played'])
     await m.answer(txt, parse_mode="Markdown")
 
-# РЕФЕРАЛКА
 @dp.message(F.text == "🤝 Рефералка")
 async def ref_cmd(m: types.Message):
     u = await get_u(m.from_user.id)
+    lang = u.get('lang', 'ua')
     bot_me = await bot.get_me()
     link = f"https://t.me/{bot_me.username}?start={m.from_user.id}"
-    await m.answer(STRINGS[u['lang']]['ref_text'].format(link=link), parse_mode="Markdown")
+    await m.answer(STRINGS[lang]['ref_text'].format(link=link), parse_mode="Markdown")
 
-# БАЛАНС
 @dp.message(F.text == "💎 Баланс")
 async def bal_cmd(m: types.Message):
     u = await get_u(m.from_user.id)
+    lang = u.get('lang', 'ua')
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Поповнити", callback_data="btn_dep"),
          InlineKeyboardButton(text="📤 Вивести", callback_data="btn_wit")]
     ])
-    await m.answer(STRINGS[u['lang']]['balance'].format(bal=u['balance']), reply_markup=kb, parse_mode="Markdown")
+    await m.answer(STRINGS[lang]['balance'].format(bal=u['balance']), reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "btn_dep")
 async def call_dep(cb: types.CallbackQuery):
     u = await get_u(cb.from_user.id)
-    await cb.message.answer(STRINGS[u['lang']]['dep_info'], parse_mode="Markdown")
+    await cb.message.answer(STRINGS[u.get('lang', 'ua')]['dep_info'], parse_mode="Markdown")
 
 @dp.callback_query(F.data == "btn_wit")
 async def call_wit(cb: types.CallbackQuery, state: FSMContext):
     u = await get_u(cb.from_user.id)
-    await cb.message.answer(STRINGS[u['lang']]['wit_prompt'])
+    await cb.message.answer(STRINGS[u.get('lang', 'ua')]['wit_prompt'])
     await state.set_state(UserStates.wait_withdraw)
 
 @dp.message(UserStates.wait_withdraw)
@@ -143,13 +144,6 @@ async def wit_step2(m: types.Message, state: FSMContext):
     await m.answer("✅ Запит прийнято.")
     await state.clear()
 
-# GAMES
-@dp.message(F.text == "🎮 Games")
-async def games_cmd(m: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎳 Боулінг", callback_data="game_bowl")]])
-    await m.answer("🕹 Оберіть гру:", reply_markup=kb)
-
-# НАЛАШТУВАННЯ ТА ПІДТРИМКА
 @dp.message(F.text == "⚙️ Налаштування")
 async def settings_cmd(m: types.Message):
     u = await get_u(m.from_user.id)
@@ -157,7 +151,7 @@ async def settings_cmd(m: types.Message):
         [InlineKeyboardButton(text="🌐 Мова / Language", callback_data="set_l")],
         [InlineKeyboardButton(text="🆘 Підтримка", callback_data="set_s")]
     ])
-    await m.answer(STRINGS[u['lang']]['settings'], reply_markup=kb)
+    await m.answer(STRINGS[u.get('lang', 'ua')]['settings'], reply_markup=kb)
 
 @dp.callback_query(F.data == "set_l")
 async def set_l(cb: types.CallbackQuery):
@@ -175,18 +169,17 @@ async def l_apply(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "set_s")
 async def support_init(cb: types.CallbackQuery, state: FSMContext):
     u = await get_u(cb.from_user.id)
-    await cb.message.answer(STRINGS[u['lang']]['support_prompt'])
+    await cb.message.answer(STRINGS[u.get('lang', 'ua')]['support_prompt'])
     await state.set_state(UserStates.wait_support)
 
 @dp.message(UserStates.wait_support)
 async def support_finish(m: types.Message, state: FSMContext):
+    u = await get_u(m.from_user.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Відповісти", callback_data=f"adm_rep_{m.from_user.id}")]])
     await bot.send_message(ADMIN_ID, f"🆘 **ПИТАННЯ ВІД {m.from_user.id}**\n\n{m.text}", reply_markup=kb)
-    u = await get_u(m.from_user.id)
-    await m.answer(STRINGS[u['lang']]['support_ok'])
+    await m.answer(STRINGS[u.get('lang', 'ua')]['support_ok'])
     await state.clear()
 
-# АДМІН-ВІДПОВІДЬ
 @dp.callback_query(F.data.startswith("adm_rep_"))
 async def adm_rep_start(cb: types.CallbackQuery, state: FSMContext):
     target = cb.data.split("_")[2]
@@ -203,7 +196,6 @@ async def adm_rep_finish(m: types.Message, state: FSMContext):
     except: await m.answer("❌ Помилка")
     await state.clear()
 
-# ПАНЕЛЬ АДМІНА (Список гравців)
 @dp.message(F.text == "🛡 Панель адміна")
 async def adm_panel(m: types.Message):
     if m.from_user.id != ADMIN_ID: return
@@ -215,7 +207,7 @@ async def adm_panel(m: types.Message):
 async def info_user(cb: types.CallbackQuery):
     uid = int(cb.data.split("_")[1])
     u = await users_col.find_one({"_id": uid})
-    text = f"👤 ID: `{uid}`\n💰 Баланс: `{u['balance']}`\n📈 Оборот: `{u['turnover']}`"
+    text = f"👤 ID: `{uid}`\n💰 Баланс: `{u['balance']}`\n📈 Оборот: `{u.get('turnover', 0)}`"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧹 Обнулити", callback_data=f"z_{uid}"), InlineKeyboardButton(text="🚫 Бан", callback_data=f"b_{uid}")]
     ])
@@ -227,9 +219,11 @@ async def zero_bal(cb: types.CallbackQuery):
     await users_col.update_one({"_id": uid}, {"$set": {"balance": 0.0}})
     await cb.answer("Баланс обнулено")
 
-# --- ЗАПУСК ---
+@dp.message(F.text == "🎮 Games")
+async def games_cmd(m: types.Message):
+    await m.answer("🎮 Ігри скоро будуть тут!")
+
 async def main():
-    print("БОТ ЗАПУЩЕНИЙ")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
