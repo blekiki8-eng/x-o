@@ -59,11 +59,10 @@ async def get_u(uid, ref_id=None):
     if not u:
         u = {
             "_id": uid, "balance": 0.0, "referals_count": 0, 
-            "turnover": 0.0, "games_played": 0, "referrer": ref_id
+            "turnover": 0.0, "games_played": 0, "referrer": ref_id,
+            "is_active_ref": False # Реферал стає активним після донату
         }
         await users_col.insert_one(u)
-        if ref_id:
-            await users_col.update_one({"_id": ref_id}, {"$inc": {"referals_count": 1}})
     return u
 
 async def add_admin_profit(amount):
@@ -72,7 +71,8 @@ async def add_admin_profit(amount):
 # --- ПРОФІЛЬ ---
 
 @dp.message(F.text == "👤 Профіль")
-async def profile_cmd(m: types.Message):
+async def profile_cmd(m: types.Message, state: FSMContext):
+    await state.clear()
     u = await get_u(m.from_user.id)
     text = (f"👤 **Профіль:**\n\n"
             f"🆔 Id: `{m.from_user.id}`\n"
@@ -86,8 +86,8 @@ async def profile_cmd(m: types.Message):
 
 @dp.callback_query(F.data == "dep")
 async def start_deposit(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("Введіть суму поповнення (мінімум 0.50 💎):")
     await state.set_state(FinanceStates.wait_dep_amount)
+    await cb.message.answer("Введіть суму поповнення (мінімум 0.50 💎):")
 
 @dp.message(FinanceStates.wait_dep_amount)
 async def dep_amount(m: types.Message, state: FSMContext):
@@ -106,7 +106,8 @@ async def dep_amount(m: types.Message, state: FSMContext):
         
         await m.answer(text, parse_mode="Markdown")
         await state.set_state(FinanceStates.wait_receipt)
-    except: await m.answer("Введіть число!")
+    except: 
+        await m.answer("Введіть число! (Наприклад: 1.5)")
 
 @dp.message(FinanceStates.wait_receipt, F.photo | F.document)
 async def dep_receipt(m: types.Message, state: FSMContext):
@@ -115,7 +116,7 @@ async def dep_receipt(m: types.Message, state: FSMContext):
         InlineKeyboardButton(text="✅ Схвалити", callback_data=f"adm_ok_{uid}_{amt}"),
         InlineKeyboardButton(text="❌ Відхилити", callback_data=f"adm_no_{uid}")
     ]])
-    await bot.send_message(ADMIN_ID, f"🔔 Новий чек!\nЮзер: `{uid}`\nСума: `{amt} 💎`", parse_mode="Markdown")
+    await bot.send_message(ADMIN_ID, f"🔔 Чек на `{amt} 💎` від `{uid}`", parse_mode="Markdown")
     if m.photo: await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, reply_markup=kb)
     else: await bot.send_document(ADMIN_ID, m.document.file_id, reply_markup=kb)
     await m.answer("⏳ Квитанцію надіслано адміну."); await state.clear()
@@ -124,8 +125,8 @@ async def dep_receipt(m: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "with")
 async def start_withdraw(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("Введіть суму для виводу (мінімум 4.5 💎):")
     await state.set_state(FinanceStates.wait_withdraw_amount)
+    await cb.message.answer("Введіть суму для виводу (мінімум 4.5 💎):")
 
 @dp.message(FinanceStates.wait_withdraw_amount)
 async def withdraw_amount(m: types.Message, state: FSMContext):
@@ -153,10 +154,56 @@ async def withdraw_final(m: types.Message, state: FSMContext):
     await bot.send_message(ADMIN_ID, admin_msg, parse_mode="Markdown", reply_markup=kb)
     await m.answer("✅ Заявка надіслана."); await state.clear()
 
+# --- ОБРОБКА АДМІН-ДІЙ (ПОПОВНЕННЯ ТА ВИВІД) ---
+
+@dp.callback_query(F.data.startswith("adm_"))
+async def adm_dep_action(cb: types.CallbackQuery):
+    _, action, uid, amt = cb.data.split("_")
+    uid, amt = int(uid), float(amt)
+    if action == "ok":
+        u = await get_u(uid)
+        # ЛОГІКА РЕФЕРАЛА: якщо це перший донат і є реферер
+        if not u.get("is_active_ref") and u.get("referrer"):
+            await users_col.update_one({"_id": u["referrer"]}, {"$inc": {"referals_count": 1}})
+            await users_col.update_one({"_id": uid}, {"$set": {"is_active_ref": True}})
+            try: await bot.send_message(u["referrer"], "🤝 Ваш реферал зробив донат! Тепер ви отримуватимете бонус з його ігор.")
+            except: pass
+
+        await users_col.update_one({"_id": uid}, {"$inc": {"balance": amt}})
+        await bot.send_message(uid, f"✅ Баланс поповнено на {amt} 💎!"); await cb.message.answer("Схвалено ✅")
+    else: await bot.send_message(uid, "❌ Чек відхилено."); await cb.message.answer("Відхилено ❌")
+
+@dp.callback_query(F.data.startswith("wd_"))
+async def adm_wd_action(cb: types.CallbackQuery):
+    _, action, uid, amt = cb.data.split("_")
+    uid, amt = int(uid), float(amt)
+    if action == "ok":
+        await bot.send_message(uid, f"✅ Вивід {amt} 💎 виконано!"); await cb.message.edit_text("Виконано ✅")
+    else:
+        await users_col.update_one({"_id": uid}, {"$inc": {"balance": amt}})
+        await bot.send_message(uid, f"❌ Вивід {amt} 💎 відхилено. Зверніться до адміна."); await cb.message.edit_text("Відхилено ❌")
+
+# --- РЕФЕРАЛЬНА СИСТЕМА ---
+
+@dp.message(F.text == "🤝 Рефералка")
+async def ref_cmd(m: types.Message, state: FSMContext):
+    await state.clear()
+    u = await get_u(m.from_user.id)
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start={m.from_user.id}"
+    
+    text = (f"🤝 **Реферальна програма**\n\n"
+            f"Запрошуйте друзів та отримуйте **1%** від кожної їхньої гри!\n"
+            f"Реферал зараховується тільки після його **першого донату**.\n\n"
+            f"👤 Кількість рефералів: `{u.get('referals_count', 0)}`👤\n"
+            f"🔗 Ваше посилання:\n`{link}`")
+    await m.answer(text, parse_mode="Markdown")
+
 # --- ЛОГІКА ІГОР ---
 
 @dp.message(F.text == "🎮 Games")
-async def games_menu(m: types.Message):
+async def games_menu(m: types.Message, state: FSMContext):
+    await state.clear()
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Гра Боулінг 🎳"), KeyboardButton(text="Гра Кубик 🎲")], [KeyboardButton(text="⬅️ Назад")]], resize_keyboard=True)
     await m.answer("Оберіть гру:", reply_markup=kb)
 
@@ -225,36 +272,21 @@ async def process_finish(g, s1, s2):
         lose_id = g['opponent_id'] if s1 > s2 else g['creator_id']
         await users_col.update_one({"_id": win_id}, {"$inc": {"balance": win_sum, "turnover": g['bet']}})
         u_win = await users_col.find_one({"_id": win_id})
+        
+        # Нарахування бонусу рефереру ТІЛЬКИ ЯКЩО реферал активний
         ref = u_win.get("referrer")
         if ref:
-            await users_col.update_one({"_id": ref}, {"$inc": {"balance": ref_sh}})
-            await add_admin_profit(adm_sh)
+            ref_data = await users_col.find_one({"_id": win_id})
+            if ref_data.get("is_active_ref"):
+                await users_col.update_one({"_id": ref}, {"$inc": {"balance": ref_sh}})
+                await add_admin_profit(adm_sh)
+            else: await add_admin_profit(g['bet'] * 0.02)
         else: await add_admin_profit(g['bet'] * 0.02)
+        
         await bot.send_message(win_id, f"🏆 Перемога! +{win_sum:.2f} 💎"); await bot.send_message(lose_id, "❌ Програш.")
     await games_col.update_one({"game_id": g['game_id']}, {"$set": {"status": "finished"}})
 
-# --- ОБРОБКА АДМІН-ДІЙ ---
-
-@dp.callback_query(F.data.startswith("adm_"))
-async def adm_dep(cb: types.CallbackQuery):
-    _, action, uid, amt = cb.data.split("_")
-    uid, amt = int(uid), float(amt)
-    if action == "ok":
-        await users_col.update_one({"_id": uid}, {"$inc": {"balance": amt}})
-        await bot.send_message(uid, f"✅ Баланс поповнено на {amt} 💎!"); await cb.message.answer("Схвалено ✅")
-    else: await bot.send_message(uid, "❌ Чек відхилено."); await cb.message.answer("Відхилено ❌")
-
-@dp.callback_query(F.data.startswith("wd_"))
-async def adm_wd(cb: types.CallbackQuery):
-    _, action, uid, amt = cb.data.split("_")
-    uid, amt = int(uid), float(amt)
-    if action == "ok":
-        await bot.send_message(uid, f"✅ Вивід {amt} 💎 виконано!"); await cb.message.edit_text("Виконано ✅")
-    else:
-        await users_col.update_one({"_id": uid}, {"$inc": {"balance": amt}})
-        await bot.send_message(uid, f"❌ Вивід {amt} 💎 відхилено. Зверніться до адміна."); await cb.message.edit_text("Відхилено ❌")
-
-# --- СТАРТ ТА ІНШЕ ---
+# --- СТАРТ ТА МЕНЮ ---
 
 @dp.message(Command("start"))
 async def start_cmd(m: types.Message, state: FSMContext):
@@ -265,13 +297,15 @@ async def start_cmd(m: types.Message, state: FSMContext):
     await m.answer("💎 Different Games!", reply_markup=main_kb())
 
 @dp.message(F.text == "💎 Баланс")
-async def balance_cmd(m: types.Message):
+async def balance_cmd(m: types.Message, state: FSMContext):
+    await state.clear()
     u = await get_u(m.from_user.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Поповнити", callback_data="dep"), InlineKeyboardButton(text="📤 Вивести", callback_data="with")]])
-    await m.answer(f"💰 Баланс: `{u.get('balance',0.0):.2f}` 💎", reply_markup=kb, parse_mode="Markdown")
+    await m.answer(f"💰 Ваш баланс: `{u.get('balance',0.0):.2f}` 💎", reply_markup=kb, parse_mode="Markdown")
 
 @dp.message(F.text == "⚙️ Налаштування")
-async def sett_cmd(m: types.Message):
+async def sett_cmd(m: types.Message, state: FSMContext):
+    await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🆘 Підтримка", url="https://t.me/vex0o0")]])
     if m.from_user.id == ADMIN_ID: kb.inline_keyboard.append([InlineKeyboardButton(text="👨‍💻 Адмін Панель", callback_data="admin_panel")])
     await m.answer("⚙️ Налаштування:", reply_markup=kb)
@@ -285,12 +319,9 @@ async def ap_cb(cb: types.CallbackQuery):
     await cb.message.answer(f"👨‍💻 Панель\nПрибуток: {profit:.4f}\n\n🏆 Топ:\n{top_t}", parse_mode="Markdown")
 
 @dp.message(F.text == "⬅️ Назад")
-async def back_cmd(m: types.Message): await m.answer("Меню", reply_markup=main_kb())
-
-@dp.message(F.text == "🤝 Рефералка")
-async def ref_cmd(m: types.Message):
-    me = await bot.get_me()
-    await m.answer(f"🔗 Посилання: `https://t.me/{me.username}?start={m.from_user.id}`")
+async def back_cmd(m: types.Message, state: FSMContext): 
+    await state.clear()
+    await m.answer("Меню", reply_markup=main_kb())
 
 async def main(): await dp.start_polling(bot)
 if __name__ == "__main__": asyncio.run(main())
