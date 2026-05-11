@@ -53,9 +53,11 @@ def main_kb(uid):
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def games_choice_kb():
+    # Кнопки вибору самої гри
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🎳"), KeyboardButton(text="🎲")], [KeyboardButton(text="⬅️ Назад")]], resize_keyboard=True)
 
 def rounds_kb():
+    # Кнопки вибору раундів, які з'являються ПІСЛЯ ставки
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="1 кидок"), KeyboardButton(text="5 кидків")]], resize_keyboard=True)
 
 # --- КОМАНДИ ---
@@ -73,13 +75,13 @@ async def cmd_start(m: types.Message, state: FSMContext):
 @dp.message(F.text == "👤 Профіль")
 async def profile_cmd(m: types.Message):
     u = await get_u(m.from_user.id)
-    text = (f"👤 **Профіль:**\n🆔 Id: `{m.from_user.id}`\n💰 Баланс: `{u['balance']:.2f}` 💎\n\n"
+    text = (f"👤 **Профіль:**\n\n🆔 Id: `{m.from_user.id}`\n💰 Баланс: `{u['balance']:.2f}` 💎\n\n"
             f"Запрошених гравців: `{u.get('referals_count', 0)}`👤\n"
             f"Оборот: `{u.get('turnover', 0.0):.2f}` 💎\n"
             f"Зіграно ігор: `{u.get('games_played', 0)}` 🎳")
     await m.answer(text, parse_mode="Markdown")
 
-# --- ЛОГІКА GAMES (НОВА ПОСЛІДОВНІСТЬ) ---
+# --- ЛОГІКА GAMES (ТВОЯ ПОСЛІДОВНІСТЬ) ---
 
 @dp.message(F.text == "🎮 Games")
 async def games_menu(m: types.Message):
@@ -100,6 +102,7 @@ async def enter_bet(m: types.Message, state: FSMContext):
         if u['balance'] < bet: return await m.answer("❌ Недостатньо 💎 на балансі")
         
         await state.update_data(bet=bet)
+        # ТУТ ПАНЕЛЬ ЗМІНЮЄТЬСЯ НА ВИБІР КИДКІВ
         await m.answer("Оберіть кількість раундів:", reply_markup=rounds_kb())
         await state.set_state(GameStates.wait_rounds)
     except: await m.answer("❌ Введіть число")
@@ -118,9 +121,12 @@ async def finish_creation(m: types.Message, state: FSMContext):
     
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=game_{gid}"
+    # ПОВЕРТАЄМО ГОЛОВНЕ МЕНЮ І ДАЄМО ПОСИЛАННЯ
     await m.answer(f"✅ **Посилання на гру:**\n`{link}`\n\nПерешліть це посилання другу щоб разом зіграти", 
                    reply_markup=main_kb(m.from_user.id), parse_mode="Markdown")
     await state.clear()
+
+# --- ЛОГІКА ГРИ ТА ХОДІВ ---
 
 async def join_game_logic(m, gid):
     g = await games_col.find_one({"game_id": gid, "status": "waiting"})
@@ -170,7 +176,7 @@ async def handle_dice(m: types.Message):
     else:
         await bot.send_message(next_p, f"Тепер ваш хід! Кидайте {emoji}")
 
-# --- БАЛАНС ТА ПОПОВНЕННЯ ---
+# --- БАЛАНС ТА АДМІН-ПІДТВЕРДЖЕННЯ ---
 
 @dp.message(F.text == "💎 Баланс")
 async def bal_menu(m: types.Message):
@@ -204,7 +210,7 @@ async def dep_rec(m: types.Message, state: FSMContext):
     await bot.send_message(ADMIN_ID, f"🔔 **Нова заявка на поповнення!**\nID: `{uid}`\nСума: `{amt} 💎`", parse_mode="Markdown")
     if m.photo: await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, reply_markup=kb)
     else: await bot.send_document(ADMIN_ID, m.document.file_id, reply_markup=kb)
-    await m.answer("⏳ Ваша квитанція надіслана адміну.")
+    await m.answer("⏳ Ваша квитанція надіслана адміну. Очікуйте!")
     await state.clear()
 
 @dp.callback_query(F.data.startswith("ap_"))
@@ -217,7 +223,7 @@ async def admin_action(cb: types.CallbackQuery):
         await bot.send_message(target_id, f"✅ Ваш баланс поповнено +{amount} 💎. Приємної гри :)")
         await cb.message.edit_caption(caption=f"{cb.message.caption}\n\n✅ **ПРИЙНЯТО**")
     else:
-        await bot.send_message(target_id, "❌ Ваша заявка відхилена, напишіть адміністратору @vex0o0")
+        await bot.send_message(target_id, "❌ Ваша заявка на поповнення відхилена, будь ласка напишіть адміністратору @vex0o0")
         await cb.message.edit_caption(caption=f"{cb.message.caption}\n\n❌ **ВІДХИЛЕНО**")
     await cb.answer()
 
