@@ -34,8 +34,9 @@ def main_kb():
     ], resize_keyboard=True)
 
 def games_kb():
+    # ТУТ ЗМІНЕНО: Текст замість голих емодзі, щоб Telegram не кидав dice сам
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🎳"), KeyboardButton(text="🎲")],
+        [KeyboardButton(text="Гра Боулінг 🎳"), KeyboardButton(text="Гра Кубик 🎲")],
         [KeyboardButton(text="⬅️ Назад")]
     ], resize_keyboard=True)
 
@@ -43,7 +44,7 @@ def games_kb():
 async def get_u(uid):
     u = await users_col.find_one({"_id": uid})
     if not u:
-        u = {"_id": uid, "balance": 10.0} # Даємо 10 для тесту
+        u = {"_id": uid, "balance": 100.0}
         await users_col.insert_one(u)
     return u
 
@@ -53,21 +54,21 @@ async def get_u(uid):
 async def cmd_start(m: types.Message, state: FSMContext):
     await state.clear()
     await get_u(m.from_user.id)
-    # Перевірка, чи це вхід за посиланням на гру
     if len(m.text.split()) > 1:
         param = m.text.split()[1]
         if param.startswith("game_"):
             return await join_game_logic(m, param.replace("game_", ""))
-    await m.answer("Вітаємо!", reply_markup=main_kb())
+    await m.answer("Вітаємо у Different games!", reply_markup=main_kb())
 
 @dp.message(F.text == "🎮 Games")
 async def games_menu(m: types.Message):
     await m.answer("Оберіть гру:", reply_markup=games_kb())
 
-@dp.message(F.text.in_(["🎳", "🎲"]))
+@dp.message(F.text.in_(["Гра Боулінг 🎳", "Гра Кубик 🎲"]))
 async def choose_game(m: types.Message, state: FSMContext):
-    # 1. Після натискання на гру — просимо ставку
-    await state.update_data(g_type=m.text)
+    # 1. Після натискання на кнопку — просимо ставку (Dice не летить!)
+    g_type = "🎳" if "Боулінг" in m.text else "🎲"
+    await state.update_data(g_type=g_type)
     await m.answer("Введіть ставку (мінімум 0.05):", reply_markup=ReplyKeyboardRemove())
     await state.set_state(GameStates.wait_bet)
 
@@ -77,7 +78,7 @@ async def enter_bet(m: types.Message, state: FSMContext):
     try:
         bet = float(m.text.replace(",", "."))
         u = await get_u(m.from_user.id)
-        if u['balance'] < bet: return await m.answer("❌ Недостатньо коштів")
+        if u['balance'] < bet: return await m.answer("❌ Недостатньо балансу")
         
         data = await state.get_data()
         gid = str(uuid.uuid4())[:8]
@@ -92,51 +93,51 @@ async def enter_bet(m: types.Message, state: FSMContext):
         await m.answer(f"Посилання на гру: {link}\n\nПерешліть це посилання другу щоб разом зіграти", reply_markup=main_kb())
         await state.clear()
     except:
-        await m.answer("Введіть число")
+        await m.answer("Введіть число!")
 
-# --- ЛОГІКА КОЛИ ЗАЙШОВ ГРАВЕЦЬ 2 ---
+# --- ЛОГІКА КОЛИ ПРИЄДНАВСЯ ДРУГ ---
 
 async def join_game_logic(m, gid):
     g = await games_col.find_one({"game_id": gid, "status": "waiting"})
     if not g or g['creator_id'] == m.from_user.id: 
-        return await m.answer("❌ Гра недоступна")
+        return await m.answer("❌ Гра недоступна або ви її творець")
     
     u2 = await get_u(m.from_user.id)
-    if u2['balance'] < g['bet']: return await m.answer("❌ Мало коштів")
+    if u2['balance'] < g['bet']: return await m.answer("❌ У вас недостатньо коштів")
     
-    # Списуємо ставку в обох
+    # Списуємо ставку
     await users_col.update_one({"_id": g['creator_id']}, {"$inc": {"balance": -g['bet']}})
     await users_col.update_one({"_id": m.from_user.id}, {"$inc": {"balance": -g['bet']}})
     
-    # Оновлюємо статус гри
     await games_col.update_one({"game_id": gid}, {
         "$set": {
             "opponent_id": m.from_user.id, 
             "status": "playing",
-            "turn": g['creator_id'], # Першим ходить Гравець 1
+            "turn": g['creator_id'], 
             "c_score": None, "o_score": None
         }
     })
     
     msg = "Гра створена ✅"
-    # Повідомляємо обох
+    # Повідомляємо обох гравців
     await bot.send_message(g['creator_id'], f"{msg}\n\nВаш хід! Кидайте стікер {g['type']}")
-    await m.answer(f"{msg}\n\nОчікуйте ходу Гравця 1")
+    await m.answer(f"{msg}\n\nЗараз ходить Гравець 1. Очікуйте.")
 
-# --- ОБРОБКА КИДКІВ (DICE) ---
+# --- ОБРОБКА КИДКІВ (ТІЛЬКИ ПІД ЧАС ГРИ) ---
 
 @dp.message(F.dice)
 async def handle_dice(m: types.Message):
-    # Шукаємо активну гру, де бере участь цей юзер
     g = await games_col.find_one({
         "status": "playing", 
         "$or": [{"creator_id": m.from_user.id}, {"opponent_id": m.from_user.id}]
     })
-    if not g or g['turn'] != m.from_user.id: return
     
-    # Перевірка, чи правильний стікер (кубик/боулінг)
-    emoji = "🎳" if g['type'] == "🎳" else "🎲"
-    if m.dice.emoji != emoji: return
+    if not g or g['turn'] != m.from_user.id: 
+        return # Ігноруємо, якщо гра не почалася або не черга гравця
+    
+    emoji = g['type']
+    if m.dice.emoji != emoji:
+        return await m.answer(f"Потрібно кинути саме {emoji}!")
     
     val = m.dice.value
     is_creator = (m.from_user.id == g['creator_id'])
@@ -144,31 +145,33 @@ async def handle_dice(m: types.Message):
     if is_creator:
         await games_col.update_one({"game_id": g['game_id']}, {"$set": {"c_score": val, "turn": g['opponent_id']}})
         await asyncio.sleep(3)
-        await bot.send_message(g['opponent_id'], f"Гравець 1 кинув на {val} очок.\nТепер ваш хід! Кидайте {emoji}")
+        await bot.send_message(g['opponent_id'], f"Гравець 1 кинув {val}.\nТепер ваш хід! Кидайте {emoji}")
     else:
-        # Гравець 2 кинув — фінал
+        # Фінал гри
         await games_col.update_one({"game_id": g['game_id']}, {"$set": {"o_score": val, "status": "finished"}})
         await asyncio.sleep(3)
         
         c_score = g['c_score']
         o_score = val
-        
-        res = f"Результати:\nГравець 1: {c_score}\nГравець 2: {o_score}\n\n"
+        res = f"Результат:\nГравець 1: {c_score}\nГравець 2: {o_score}\n\n"
         
         if c_score > o_score:
-            win_id = g['creator_id']
-            await bot.send_message(g['creator_id'], res + "Ви перемогли! 🏆"); await bot.send_message(g['opponent_id'], res + "Ви програли ❌")
+            winner = g['creator_id']
+            await bot.send_message(g['creator_id'], res + "Ви перемогли! 🏆")
+            await bot.send_message(g['opponent_id'], res + "Ви програли ❌")
         elif o_score > c_score:
-            win_id = g['opponent_id']
-            await bot.send_message(g['opponent_id'], res + "Ви перемогли! 🏆"); await bot.send_message(g['creator_id'], res + "Ви програли ❌")
+            winner = g['opponent_id']
+            await bot.send_message(g['opponent_id'], res + "Ви перемогли! 🏆")
+            await bot.send_message(g['creator_id'], res + "Ви програли ❌")
         else:
-            win_id = None
-            await bot.send_message(g['creator_id'], res + "Нічия!"); await bot.send_message(g['opponent_id'], res + "Нічия!")
-        
-        if win_id:
-            await users_col.update_one({"_id": win_id}, {"$inc": {"balance": g['bet'] * 1.95}})
+            winner = None
+            await bot.send_message(g['creator_id'], res + "Нічия! Повернення ставок.")
+            await bot.send_message(g['opponent_id'], res + "Нічия! Повернення ставок.")
+
+        # Виплата
+        if winner:
+            await users_col.update_one({"_id": winner}, {"$inc": {"balance": g['bet'] * 1.95}})
         else:
-            # Повертаємо ставки при нічиї
             await users_col.update_one({"_id": g['creator_id']}, {"$inc": {"balance": g['bet']}})
             await users_col.update_one({"_id": g['opponent_id']}, {"$inc": {"balance": g['bet']}})
 
