@@ -46,7 +46,6 @@ def main_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="👤 Профіль"), KeyboardButton(text="🎮 Games")],
         [KeyboardButton(text="💎 Баланс"), KeyboardButton(text="🤝 Рефералка")],
-        [KeyboardButton(text="🏆 Топ Рефералів"), KeyboardButton(text="📊 Топ Оборотів")],
         [KeyboardButton(text="⚙️ Налаштування")]
     ], resize_keyboard=True)
 
@@ -101,23 +100,6 @@ async def profile_cmd(m: types.Message):
         f"\n👥 Запрошено друзів: `{u.get('referals_count', 0)}`"
         f"\n🎮 Ігор зіграно: `{u.get('games_played', 0)}`", parse_mode="Markdown"
     )
-
-# --- ТОПИ ---
-@dp.message(F.text == "🏆 Топ Рефералів")
-async def top_refs(m: types.Message):
-    top = await users_col.find().sort("referals_count", -1).limit(10).to_list(10)
-    text = "🏆 **Топ 10 по рефералах:**\n\n"
-    for i, u in enumerate(top, 1):
-        text += f"{i}. ID: `{u['_id']}` — {u.get('referals_count', 0)} друзів\n"
-    await m.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "📊 Топ Оборотів")
-async def top_turnover(m: types.Message):
-    top = await users_col.find().sort("turnover", -1).limit(10).to_list(10)
-    text = "📊 **Топ 10 по обороту:**\n\n"
-    for i, u in enumerate(top, 1):
-        text += f"{i}. ID: `{u['_id']}` — {u.get('turnover', 0.0):.2f} 💎\n"
-    await m.answer(text, parse_mode="Markdown")
 
 # --- РЕФЕРАЛКА ---
 @dp.message(F.text == "🤝 Рефералка")
@@ -228,7 +210,7 @@ async def dep_a(m: types.Message, state: FSMContext):
         amt = float(m.text)
         if amt < 0.50: return await m.answer("❌ Мінімум 0.50 💎")
         await state.update_data(amt=amt)
-        await m.answer(f"До оплати: `{(amt*CURRATE)*1.05:.2f} ГРН`\nРеквізити: `5355 2800 2890 2177`\n\nНадішліть фото чеку!")
+        await m.answer(f"До оплати: `{(amt*CURRATE)*1.05:.2f} ГРН` (+5%)\nРеквізити: `5355 2800 2890 2177`\n\nНадішліть фото чеку!")
         await state.set_state(FinanceStates.wait_receipt)
     except: await m.answer("Введіть число!")
 
@@ -278,7 +260,7 @@ async def draw_4(m: types.Message, state: FSMContext):
     await finance_col.insert_one({"_id": tid, "uid": m.from_user.id, "amt": d['amt'], "type": "draw", "info": f"IBAN: {d['iban']}\nПІБ: {d['pib']}\nІПН: {m.text}"})
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Виплачено", callback_data=f"dok_{tid}"), InlineKeyboardButton(text="❌ Відхилити", callback_data=f"dno_{tid}")]])
     await bot.send_message(ADMIN_ID, f"📤 ЗАЯВКА НА ВИВІД {d['amt']} 💎\n{d['iban']}\n{d['pib']}\nІПН: {m.text}", reply_markup=kb)
-    await m.answer("✅ Заявку створено!", reply_markup=main_kb())
+    await m.answer("✅ Заявку створено та передано адміністратору!", reply_markup=main_kb())
     await state.clear()
 
 # --- АДМІН-ФУНКЦІЇ ---
@@ -294,7 +276,7 @@ async def adm_fok(cb: types.CallbackQuery):
 async def adm_fno(cb: types.CallbackQuery):
     tid = cb.data[4:]; f = await finance_col.find_one({"_id": tid})
     if f:
-        await bot.send_message(f['uid'], "❌ Поповнення відхилено.")
+        await bot.send_message(f['uid'], "❌ Поповнення відхилено адміністрацією.")
         await cb.message.delete(); await finance_col.delete_one({"_id": tid})
 
 @dp.callback_query(F.data.startswith("dok_"))
@@ -307,7 +289,7 @@ async def adm_dno(cb: types.CallbackQuery):
     tid = cb.data[4:]; f = await finance_col.find_one({"_id": tid})
     if f:
         await users_col.update_one({"_id": f['uid']}, {"$inc": {"balance": f['amt']}})
-        await bot.send_message(f['uid'], "❌ Вивід відхилено. Кошти повернуто.")
+        await bot.send_message(f['uid'], "❌ Вивід відхилено. Кошти повернуто на баланс.")
         await cb.message.delete(); await finance_col.delete_one({"_id": tid})
 
 @dp.message(F.text == "⚙️ Налаштування")
