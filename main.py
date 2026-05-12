@@ -46,6 +46,7 @@ def main_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="👤 Профіль"), KeyboardButton(text="🎮 Games")],
         [KeyboardButton(text="💎 Баланс"), KeyboardButton(text="🤝 Рефералка")],
+        [KeyboardButton(text="🏆 Топ Рефералів"), KeyboardButton(text="📊 Топ Оборотів")],
         [KeyboardButton(text="⚙️ Налаштування")]
     ], resize_keyboard=True)
 
@@ -101,6 +102,23 @@ async def profile_cmd(m: types.Message):
         f"\n🎮 Ігор зіграно: `{u.get('games_played', 0)}`", parse_mode="Markdown"
     )
 
+# --- ТОПИ ---
+@dp.message(F.text == "🏆 Топ Рефералів")
+async def top_refs(m: types.Message):
+    top = await users_col.find().sort("referals_count", -1).limit(10).to_list(10)
+    text = "🏆 **Топ 10 по рефералах:**\n\n"
+    for i, u in enumerate(top, 1):
+        text += f"{i}. ID: `{u['_id']}` — {u.get('referals_count', 0)} друзів\n"
+    await m.answer(text, parse_mode="Markdown")
+
+@dp.message(F.text == "📊 Топ Оборотів")
+async def top_turnover(m: types.Message):
+    top = await users_col.find().sort("turnover", -1).limit(10).to_list(10)
+    text = "📊 **Топ 10 по обороту:**\n\n"
+    for i, u in enumerate(top, 1):
+        text += f"{i}. ID: `{u['_id']}` — {u.get('turnover', 0.0):.2f} 💎\n"
+    await m.answer(text, parse_mode="Markdown")
+
 # --- РЕФЕРАЛКА ---
 @dp.message(F.text == "🤝 Рефералка")
 async def referal_cmd(m: types.Message):
@@ -154,9 +172,9 @@ async def dice_handler(m: types.Message):
     f = "c_score" if is_c else "o_score"
     
     await bot.send_message(opp, "Суперник кинув стікер:")
-    await m.forward(opp) # Миттєве пересилання стікера
+    await m.forward(opp)
     
-    await asyncio.sleep(4) # Очікування анімації
+    await asyncio.sleep(4) 
     val = m.dice.value
     await m.answer(f"Результат кидка: {val}")
     await bot.send_message(opp, f"У суперника випало: {val}")
@@ -192,7 +210,7 @@ async def finish_game(g):
                 await bot.send_message(uid, res + "❌ Нажаль ви програли")
     await games_col.update_one({"game_id": g['game_id']}, {"$set": {"status": "finished"}})
 
-# --- БАЛАНС & ПОПОВНЕННЯ & ВИВІД ---
+# --- БАЛАНС / ПОПОВНЕННЯ / ВИВІД ---
 @dp.message(F.text == "💎 Баланс")
 async def balance_menu(m: types.Message):
     u = await get_u(m.from_user.id)
@@ -210,7 +228,7 @@ async def dep_a(m: types.Message, state: FSMContext):
         amt = float(m.text)
         if amt < 0.50: return await m.answer("❌ Мінімум 0.50 💎")
         await state.update_data(amt=amt)
-        await m.answer(f"До оплати: `{(amt*CURRATE)*1.05:.2f} ГРН` (+5%)\nРеквізити: `5355 2800 2890 2177`\n\nНадішліть фото чеку!")
+        await m.answer(f"До оплати: `{(amt*CURRATE)*1.05:.2f} ГРН`\nРеквізити: `5355 2800 2890 2177`\n\nНадішліть фото чеку!")
         await state.set_state(FinanceStates.wait_receipt)
     except: await m.answer("Введіть число!")
 
@@ -260,7 +278,7 @@ async def draw_4(m: types.Message, state: FSMContext):
     await finance_col.insert_one({"_id": tid, "uid": m.from_user.id, "amt": d['amt'], "type": "draw", "info": f"IBAN: {d['iban']}\nПІБ: {d['pib']}\nІПН: {m.text}"})
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Виплачено", callback_data=f"dok_{tid}"), InlineKeyboardButton(text="❌ Відхилити", callback_data=f"dno_{tid}")]])
     await bot.send_message(ADMIN_ID, f"📤 ЗАЯВКА НА ВИВІД {d['amt']} 💎\n{d['iban']}\n{d['pib']}\nІПН: {m.text}", reply_markup=kb)
-    await m.answer("✅ Заявку створено та передано адміністратору!", reply_markup=main_kb())
+    await m.answer("✅ Заявку створено!", reply_markup=main_kb())
     await state.clear()
 
 # --- АДМІН-ФУНКЦІЇ ---
@@ -276,7 +294,7 @@ async def adm_fok(cb: types.CallbackQuery):
 async def adm_fno(cb: types.CallbackQuery):
     tid = cb.data[4:]; f = await finance_col.find_one({"_id": tid})
     if f:
-        await bot.send_message(f['uid'], "❌ Поповнення відхилено адміністрацією.")
+        await bot.send_message(f['uid'], "❌ Поповнення відхилено.")
         await cb.message.delete(); await finance_col.delete_one({"_id": tid})
 
 @dp.callback_query(F.data.startswith("dok_"))
@@ -289,7 +307,7 @@ async def adm_dno(cb: types.CallbackQuery):
     tid = cb.data[4:]; f = await finance_col.find_one({"_id": tid})
     if f:
         await users_col.update_one({"_id": f['uid']}, {"$inc": {"balance": f['amt']}})
-        await bot.send_message(f['uid'], "❌ Вивід відхилено. Кошти повернуто на баланс.")
+        await bot.send_message(f['uid'], "❌ Вивід відхилено. Кошти повернуто.")
         await cb.message.delete(); await finance_col.delete_one({"_id": tid})
 
 @dp.message(F.text == "⚙️ Налаштування")
@@ -301,7 +319,25 @@ async def sett_cmd(m: types.Message):
 @dp.callback_query(F.data == "admin")
 async def adm_p(cb: types.CallbackQuery):
     c = await users_col.count_documents({})
-    await cb.message.answer(f"📊 Статистика:\nВсього юзерів: {c}")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏆 Топ Рефералів", callback_data="adm_top_ref")],
+        [InlineKeyboardButton(text="📊 Топ Оборотів", callback_data="adm_top_turn")]
+    ])
+    await cb.message.answer(f"📊 Статистика:\nВсього юзерів: {c}", reply_markup=kb)
+
+@dp.callback_query(F.data == "adm_top_ref")
+async def adm_top_ref(cb: types.CallbackQuery):
+    top = await users_col.find().sort("referals_count", -1).limit(10).to_list(10)
+    text = "🏆 **Адмін: Топ 10 по рефералах:**\n\n"
+    for i, u in enumerate(top, 1): text += f"{i}. ID: `{u['_id']}` — {u.get('referals_count', 0)}\n"
+    await cb.message.answer(text, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "adm_top_turn")
+async def adm_top_turn(cb: types.CallbackQuery):
+    top = await users_col.find().sort("turnover", -1).limit(10).to_list(10)
+    text = "📊 **Адмін: Топ 10 по обороту:**\n\n"
+    for i, u in enumerate(top, 1): text += f"{i}. ID: `{u['_id']}` — {u.get('turnover', 0.0):.2f}\n"
+    await cb.message.answer(text, parse_mode="Markdown")
 
 async def main(): await dp.start_polling(bot)
 if __name__ == "__main__": asyncio.run(main())
