@@ -120,7 +120,6 @@ async def handle_dice(m: types.Message):
     
     await games_col.update_one({"game_id": g['game_id']}, {"$push": {field: m.dice.value}})
     
-    # Показуємо стікер супернику
     await bot.send_dice(opp_id, emoji=g['type'])
     await bot.send_message(opp_id, f"🎰 Суперник кинув і вибив: **{m.dice.value}**", parse_mode="Markdown")
 
@@ -181,45 +180,76 @@ async def ref_cmd(m: types.Message):
             f"👤 Запрошено: `{u.get('referals_count', 0)}` осіб\n\n🔗 Посилання:\n`https://t.me/{me.username}?start={m.from_user.id}`")
     await m.answer(text, parse_mode="Markdown")
 
-# --- СИСТЕМА ПОПОВНЕННЯ ---
+# --- НОРМАЛЬНА СИСТЕМА ПОПОВНЕННЯ З КВИТАНЦІЄЮ ---
 @dp.callback_query(F.data == "dep")
 async def dep_start(cb: types.CallbackQuery, state: FSMContext):
     await state.set_state(FinanceStates.wait_dep_amount)
-    await cb.message.answer("💎 Введіть суму (мін 0.50):", reply_markup=cancel_kb())
+    await cb.message.answer("💎 Введіть суму поповнення (мін 0.50):", reply_markup=cancel_kb())
 
 @dp.message(FinanceStates.wait_dep_amount)
 async def dep_amt(m: types.Message, state: FSMContext):
     try:
         amt = float(m.text.replace(",", "."))
+        if amt < 0.5: return await m.answer("❌ Мінімальна сума 0.50")
         total_uah = (amt * CURRATE) * 1.05
         await state.update_data(amt=amt)
-        await m.answer(f"💰 До оплати: `{total_uah:.2f} ГРН`\n💳 **Mono:** `5355 2800 2890 2177`\nНадішліть скрін чека:", parse_mode="Markdown")
+        await m.answer(f"📊 **Заявка на поповнення**\n\n💰 Сума: `{amt:.2f} 💎`\n💵 До оплати: `{total_uah:.2f} ГРН`\n\n💳 **Mono:** `5355 2800 2890 2177`\n\n**Надішліть квитанцію (фото або файл):**", parse_mode="Markdown")
         await state.set_state(FinanceStates.wait_receipt)
-    except: await m.answer("Число!")
+    except: await m.answer("Введіть коректне число!")
 
 @dp.message(FinanceStates.wait_receipt, F.photo | F.document)
 async def dep_receipt(m: types.Message, state: FSMContext):
-    data = await state.get_data(); t_id = str(uuid.uuid4())[:12]
-    await finance_col.insert_one({"_id": t_id, "user_id": m.from_user.id, "amount": data['amt'], "status": "pending"})
+    data = await state.get_data()
+    t_id = str(uuid.uuid4())[:12]
+    
+    # Зберігаємо транзакцію в БД зі статусом очікування
+    await finance_col.insert_one({
+        "_id": t_id, 
+        "user_id": m.from_user.id, 
+        "amount": data['amt'], 
+        "status": "pending"
+    })
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Схвалити", callback_data=f"dep_ok_{t_id}"),
         InlineKeyboardButton(text="❌ Відхилити", callback_data=f"dep_no_{t_id}")
     ]])
-    await bot.send_message(ADMIN_ID, f"🔔 Чек на {data['amt']} 💎 від `{m.from_user.id}`", reply_markup=kb, parse_mode="Markdown")
-    await m.answer("✅ Чек надіслано!", reply_markup=main_kb()); await state.clear()
+    
+    caption = f"🔔 **Нова квитанція!**\n💰 Сума: `{data['amt']} 💎`\n👤 Від: `{m.from_user.id}`"
+    
+    # Надсилаємо адміну саме файл/фото
+    if m.photo:
+        await bot.send_photo(ADMIN_ID, m.photo[-1].file_id, caption=caption, reply_markup=kb, parse_mode="Markdown")
+    else:
+        await bot.send_document(ADMIN_ID, m.document.file_id, caption=caption, reply_markup=kb, parse_mode="Markdown")
+    
+    await m.answer("✅ Ваша квитанція надіслана адміну на перевірку!", reply_markup=main_kb())
+    await state.clear()
 
 @dp.callback_query(F.data.startswith("dep_"))
-async def adm_dep(cb: types.CallbackQuery):
+async def adm_dep_process(cb: types.CallbackQuery):
     _, act, t_id = cb.data.split("_")
     trans = await finance_col.find_one({"_id": t_id})
-    if not trans or trans['status'] != "pending": return await cb.answer("Вже оброблено!")
+    
+    if not trans or trans['status'] != "pending":
+        return await cb.answer("❌ Ця заявка вже була оброблена!", show_alert=True)
+    
     if act == "ok":
         await finance_col.update_one({"_id": t_id}, {"$set": {"status": "completed"}})
+        # Нараховуємо баланс
         await users_col.update_one({"_id": trans['user_id']}, {"$inc": {"balance": trans['amount']}})
-        await bot.send_message(trans['user_id'], f"✅ Зараховано {trans['amount']} 💎"); await cb.message.edit_caption(caption="✅ **СХВАЛЕНО**")
+        
+        # Перевірка реферальної активації
+        u = await get_u(trans['user_id'])
+        if not u.get("is_active_ref") and u.get("referrer"):
+            await users_col.update_one({"_id": trans['user_id']}, {"$set": {"is_active_ref": True}})
+
+        await bot.send_message(trans['user_id'], f"✅ Ваше поповнення на {trans['amount']} 💎 схвалено!")
+        await cb.message.edit_caption(caption=cb.message.caption + "\n\n✅ **СХВАЛЕНО**")
     else:
         await finance_col.update_one({"_id": t_id}, {"$set": {"status": "rejected"}})
-        await bot.send_message(trans['user_id'], "❌ Чек відхилено."); await cb.message.edit_caption(caption="❌ **ВІДХИЛЕНО**")
+        await bot.send_message(trans['user_id'], "❌ Ваше поповнення було відхилено.")
+        await cb.message.edit_caption(caption=cb.message.caption + "\n\n❌ **ВІДХИЛЕНО**")
 
 # --- СИСТЕМА ВИВЕДЕННЯ ---
 @dp.callback_query(F.data == "with")
@@ -232,9 +262,9 @@ async def with_amt(m: types.Message, state: FSMContext):
     try:
         amt = float(m.text.replace(",", "."))
         u = await get_u(m.from_user.id)
-        if amt < 4.0 or u['balance'] < amt: return await m.answer("❌ Мало коштів")
+        if amt < 4.0 or u['balance'] < amt: return await m.answer("❌ Недостатньо балансу (мін 4.0)")
         await state.update_data(w_amt=amt)
-        await m.answer("📝 Введіть дані одним повідомленням: IBAN, ІПН, ПІБ", reply_markup=cancel_kb())
+        await m.answer("📝 Введіть дані для виплати одним повідомленням:\n\n1. IBAN\n2. ІПН\n3. ПІБ отримувача", reply_markup=cancel_kb())
         await state.set_state(FinanceStates.wait_withdraw_details)
     except: await m.answer("Число!")
 
@@ -257,11 +287,11 @@ async def adm_with(cb: types.CallbackQuery):
     if not trans or trans['status'] != "w_pending": return await cb.answer("Вже оброблено!")
     if act == "ok":
         await finance_col.update_one({"_id": t_id}, {"$set": {"status": "w_completed"}})
-        await bot.send_message(trans['user_id'], "✅ Виплачено!"); await cb.message.edit_text("✅ **ГОТОВО**")
+        await bot.send_message(trans['user_id'], "✅ Виплачено!"); await cb.message.edit_text(cb.message.text + "\n\n✅ **ВИКОНАНО**")
     else:
         await finance_col.update_one({"_id": t_id}, {"$set": {"status": "w_rejected"}})
         await users_col.update_one({"_id": trans['user_id']}, {"$inc": {"balance": trans['amount']}})
-        await bot.send_message(trans['user_id'], "❌ Вивід відхилено. Кошти повернуто."); await cb.message.edit_text("❌ **ВІДХИЛЕНО**")
+        await bot.send_message(trans['user_id'], "❌ Вивід відхилено. Кошти повернуто."); await cb.message.edit_text(cb.message.text + "\n\n❌ **ВІДХИЛЕНО**")
 
 # --- СТАРТ ТА АДМІНКА ---
 @dp.message(Command("start"))
