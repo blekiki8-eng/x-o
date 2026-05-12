@@ -82,7 +82,7 @@ async def referal_cmd(m: types.Message):
     link = f"https://t.me/{bot_info.username}?start={m.from_user.id}"
     await m.answer(f"🤝 **Реферальна система**\n\n🔗 Твоє посилання:\n`{link}`\n\n👥 Запрошено друзів: `{u.get('referals_count', 0)}` осіб\n🎁 Ти отримуєш 1% від кожного ВИГРАШУ твого реферала!", parse_mode="Markdown")
 
-# --- ФІНАНСИ ---
+# --- ФІНАНСИ (ПОПОВНЕННЯ З +5%) ---
 @dp.message(F.text == "💎 Баланс")
 async def balance_cmd(m: types.Message):
     u = await get_u(m.from_user.id)
@@ -100,8 +100,9 @@ async def dep_amt(m: types.Message, state: FSMContext):
         amt = float(m.text.replace(",", "."))
         if amt < 0.5: return await m.answer("❌ Мінімальна сума поповнення — 0.50 💎")
         await state.update_data(amt=amt)
-        total_pay = amt * CURRATE
-        await m.answer(f"Курс: `{CURRATE}`\nДо оплати: `{total_pay:.2f} ГРН`\n\nРеквізити: `5355 2800 2890 2177`\n\n**Обовʼязково сюди кидайте квитанцію для підтвердження!**", parse_mode="Markdown")
+        # Розрахунок: (сума * курс) + 5% комісії
+        total_pay = (amt * CURRATE) * 1.05
+        await m.answer(f"Курс: `{CURRATE}`\nДо оплати: `{total_pay:.2f} ГРН` (+5%)\n\nРеквізити: `5355 2800 2890 2177`\n\n**Обовʼязково сюди кидайте квитанцію для підтвердження!**", parse_mode="Markdown")
         await state.set_state(FinanceStates.wait_receipt)
     except: await m.answer("Будь ласка, введіть число.")
 
